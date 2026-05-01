@@ -1,0 +1,57 @@
+# Dependencies
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Build output
+dist/
+build/
+*.js
+*.js.map
+!jest.config.js
+!webpack.config.js
+
+# TypeScript
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+
+# Pi-specific runtime files
+.pi/
+tmp/
+*.log
+*.tgz
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+[Tt]humbs.db
+
+# Test coverage
+coverage/
+.nyc_output/
+*.lcov
+
+# Misc
+*.tgz
+*.tar.gz
+*.zip
+.cache/
