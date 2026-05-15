@@ -43,7 +43,7 @@ type CdpSocket = {
   close(): void;
 };
 
-const DEFAULT_SEARCH_URL = "https://html.duckduckgo.com/html/?q={query}";
+const DEFAULT_SEARCH_URL = "https://www.bing.com/search?q={query}";
 const LIGHTPANDA_INSTALL_URL = "https://github.com/lightpanda-io/browser";
 const LIGHTPANDA_BINARY_NAME = "lightpanda";
 const LIGHTPANDA_INSTALL_PATH = `${getHomeDir()}/.pi/agent/bin/${LIGHTPANDA_BINARY_NAME}`;
@@ -816,7 +816,8 @@ async function setBrowserFallbackPath(ctx: ExtensionContext, params: ConfigureBr
   };
 }
 
-async function runBrowserCdpFallback(url: string, toolName: string): Promise<ToolOutput | undefined> {
+async function runBrowserCdpFallback(url: string, toolName: string, signal?: AbortSignal): Promise<ToolOutput | undefined> {
+  if (signal?.aborted) return undefined;
   const browserBinary = await resolveBrowserFallbackBinary();
   if (!browserBinary) {
     return undefined;
@@ -981,7 +982,8 @@ async function runBrowserCdpFallback(url: string, toolName: string): Promise<Too
   }
 }
 
-async function runPlaywrightFallback(ctx: ExtensionContext, url: string, toolName: string): Promise<ToolOutput | undefined> {
+async function runPlaywrightFallback(ctx: ExtensionContext, url: string, toolName: string, signal?: AbortSignal): Promise<ToolOutput | undefined> {
+  if (signal?.aborted) return undefined;
   let chromium: typeof import("playwright").chromium;
   try {
     ({ chromium } = await import("playwright"));
@@ -1105,7 +1107,9 @@ async function runPlaywrightFallback(ctx: ExtensionContext, url: string, toolNam
   return undefined;
 }
 
-async function fetchWithFallback(toolName: string, url: string, ctx: ExtensionContext): Promise<ToolOutput> {
+async function fetchWithFallback(toolName: string, url: string, ctx: ExtensionContext, signal?: AbortSignal): Promise<ToolOutput> {
+  if (signal?.aborted) return { content: [{ type: 'text', text: '# Aborted by caller' }], details: { url, rendered: false, error: 'Aborted' } };
+
   const lightpandaBinary = getLightpandaBinary();
   const lightpandaAvailable = await isLightpandaAvailable(lightpandaBinary);
   if (!lightpandaAvailable) {
@@ -1114,9 +1118,13 @@ async function fetchWithFallback(toolName: string, url: string, ctx: ExtensionCo
   }
 
   try {
+    if (signal?.aborted) return { content: [{ type: 'text', text: '# Aborted by caller' }], details: { url, rendered: false, error: 'Aborted' } };
+
     const result = await fetchMarkdown(lightpandaBinary, url);
     const body = result.stdout.trim();
     const stderr = result.stderr.trim();
+
+    if (signal?.aborted) return { content: [{ type: 'text', text: '# Aborted by caller' }], details: { url, rendered: false, error: 'Aborted' } };
 
     if (body && !isBlockedOrChallenge(body)) {
       return {
@@ -1132,15 +1140,19 @@ async function fetchWithFallback(toolName: string, url: string, ctx: ExtensionCo
       };
     }
 
-    const browserFallback = await runBrowserCdpFallback(url, toolName);
+    if (signal?.aborted) return { content: [{ type: 'text', text: '# Aborted by caller' }], details: { url, rendered: false, error: 'Aborted' } };
+
+    const browserFallback = await runBrowserCdpFallback(url, toolName, signal);
     if (browserFallback?.details && (browserFallback.details as { rendered?: boolean }).rendered === true) {
       return browserFallback;
     }
 
+    if (signal?.aborted) return { content: [{ type: 'text', text: '# Aborted by caller' }], details: { url, rendered: false, error: 'Aborted' } };
+
     // Skip Playwright if not available
     let playwrightFallback: ToolOutput | undefined;
     try {
-      playwrightFallback = await runPlaywrightFallback(ctx, url, toolName);
+      playwrightFallback = await runPlaywrightFallback(ctx, url, toolName, signal);
     } catch {
       // Playwright not available
     }
@@ -1160,12 +1172,14 @@ async function fetchWithFallback(toolName: string, url: string, ctx: ExtensionCo
     
     return errorResult;
   } catch (error) {
-    const browserFallback = await runBrowserCdpFallback(url, toolName);
+    if (signal?.aborted) return { content: [{ type: 'text', text: '# Aborted by caller' }], details: { url, rendered: false, error: 'Aborted' } };
+    const browserFallback = await runBrowserCdpFallback(url, toolName, signal);
     if (browserFallback?.details && (browserFallback.details as { rendered?: boolean }).rendered === true) {
       return browserFallback;
     }
 
-    const playwrightFallback = await runPlaywrightFallback(ctx, url, toolName);
+    if (signal?.aborted) return { content: [{ type: 'text', text: '# Aborted by caller' }], details: { url, rendered: false, error: 'Aborted' } };
+    const playwrightFallback = await runPlaywrightFallback(ctx, url, toolName, signal);
     if (playwrightFallback?.details && (playwrightFallback.details as { rendered?: boolean }).rendered === true) {
       return playwrightFallback;
     }
@@ -1199,7 +1213,8 @@ export default function registerWebSearchTool(pi: ExtensionAPI) {
       },
       additionalProperties: false,
     },
-    async execute(_toolCallId: string, params: InstallParams, _signal, _onUpdate, ctx): Promise<ToolOutput> {
+    async execute(_toolCallId: string, params: InstallParams, signal, _onUpdate, ctx): Promise<ToolOutput> {
+      if (signal?.aborted) return { content: [{ type: 'text', text: 'Aborted by caller' }], details: { installed: false, cancelled: true } };
       return installLightpanda(ctx, { force: params.force === true });
     },
   });
@@ -1223,7 +1238,8 @@ export default function registerWebSearchTool(pi: ExtensionAPI) {
       },
       additionalProperties: false,
     },
-    async execute(_toolCallId: string, params: InstallParams, _signal, _onUpdate, ctx): Promise<ToolOutput> {
+    async execute(_toolCallId: string, params: InstallParams, signal, _onUpdate, ctx): Promise<ToolOutput> {
+      if (signal?.aborted) return { content: [{ type: 'text', text: 'Aborted by caller' }], details: { installed: false, cancelled: true } };
       return installPlaywrightRuntime(ctx, { force: params.force === true });
     },
   });
@@ -1249,7 +1265,8 @@ export default function registerWebSearchTool(pi: ExtensionAPI) {
       required: ["browserPath"],
       additionalProperties: false,
     },
-    async execute(_toolCallId: string, params: ConfigureBrowserParams, _signal, _onUpdate, ctx): Promise<ToolOutput> {
+    async execute(_toolCallId: string, params: ConfigureBrowserParams, signal, _onUpdate, ctx): Promise<ToolOutput> {
+      if (signal?.aborted) return { content: [{ type: 'text', text: 'Aborted by caller' }], details: { configured: false, cancelled: true } };
       return setBrowserFallbackPath(ctx, params);
     },
   });
@@ -1276,13 +1293,14 @@ export default function registerWebSearchTool(pi: ExtensionAPI) {
       required: ["query"],
       additionalProperties: false,
     },
-    async execute(_toolCallId: string, params: SearchParams, _signal, _onUpdate, ctx): Promise<ToolOutput> {
+    async execute(_toolCallId: string, params: SearchParams, signal, _onUpdate, ctx): Promise<ToolOutput> {
+      if (signal?.aborted) return { content: [{ type: 'text', text: 'Aborted by caller' }], details: { query: params.query } };
       const query = params.query.trim();
       if (!query) {
         throw new Error("Query is required.");
       }
 
-      return fetchWithFallback("web-search", getSearchUrl(query), ctx);
+      return fetchWithFallback("web-search", getSearchUrl(query), ctx, signal);
     },
   });
 
@@ -1307,8 +1325,9 @@ export default function registerWebSearchTool(pi: ExtensionAPI) {
       required: ["url"],
       additionalProperties: false,
     },
-    async execute(_toolCallId: string, params: OpenUrlParams, _signal, _onUpdate, ctx): Promise<ToolOutput> {
-      return fetchWithFallback("open-url", normalizeUrl(params.url), ctx);
+    async execute(_toolCallId: string, params: OpenUrlParams, signal, _onUpdate, ctx): Promise<ToolOutput> {
+      if (signal?.aborted) return { content: [{ type: 'text', text: 'Aborted by caller' }], details: { url: params.url } };
+      return fetchWithFallback("open-url", normalizeUrl(params.url), ctx, signal);
     },
   });
 }
