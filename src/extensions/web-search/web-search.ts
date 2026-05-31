@@ -188,6 +188,18 @@ async function isSearxngAvailable(searxngUrl: string): Promise<boolean> {
   } catch { return false; }
 }
 
+// Safe string coercion for JSON API responses
+function safeStr(v: unknown): string {
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  return "";
+}
+
+function safeStrArray(arr: unknown): string[] {
+  if (!Array.isArray(arr)) return [];
+  return arr.filter((x): x is string => typeof x === "string");
+}
+
 async function searchSearxng(
   query: string,
   searxngUrl: string,
@@ -199,17 +211,34 @@ async function searchSearxng(
   // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
   const data: Record<string, unknown> = JSON.parse(res.stdout);
 
-  const results = (data.results as Array<Record<string, string>>) || [];
-  const answers = (data.answers as string[]) || [];
-  const suggestions = (data.suggestions as string[]) || [];
-  const infoboxes = (data.infoboxes as Array<Record<string, string>>) || [];
-  const unresponsive = (data.unresponsive_engines as string[]) || [];
-  const numResults = data.number_of_results as number | undefined;
+  const rawResults = data.results;
+  const results: Array<Record<string, string>> = Array.isArray(rawResults)
+    ? rawResults.map((item: unknown) => {
+        const obj = (item && typeof item === "object") ? item as Record<string, unknown> : {};
+        return {
+          title: safeStr(obj.title),
+          url: safeStr(obj.url),
+          content: safeStr(obj.content),
+          engine: safeStr(obj.engine),
+        };
+      })
+    : [];
+  const answers = safeStrArray(data.answers);
+  const suggestions = safeStrArray(data.suggestions);
+  const unresponsive = safeStrArray(data.unresponsive_engines);
+  const rawInfoboxes = data.infoboxes;
+  const infoboxes: Array<{ infobox: string; content: string }> = Array.isArray(rawInfoboxes)
+    ? rawInfoboxes.map((item: unknown) => {
+        const obj = (item && typeof item === "object") ? item as Record<string, unknown> : {};
+        return { infobox: safeStr(obj.infobox), content: safeStr(obj.content) };
+      })
+    : [];
+  const numResults = typeof data.number_of_results === "number" ? data.number_of_results : undefined;
 
   const lines: string[] = [];
   if (infoboxes.length) {
     for (const box of infoboxes) {
-      lines.push(`> **${box.infobox || ""}** — ${box.content || ""}`);
+      lines.push(`> **${box.infobox}** — ${box.content}`);
     }
     lines.push("");
   }
