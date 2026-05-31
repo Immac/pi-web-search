@@ -68,9 +68,6 @@ const BROWSER_FALLBACK_CANDIDATES = [
   "chromium-browser",
 ].filter((value): value is string => Boolean(value));
 
-let missingBackendWarned = false;
-let playwrightWarned = false;
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(() => resolve(), ms);
@@ -638,16 +635,11 @@ function makeFetchFailureResult(toolName: string, target: string, error: unknown
 }
 
 async function warnIfMissingBackend(ctx: ExtensionContext, binary: string): Promise<void> {
-  if (missingBackendWarned) {
-    return;
-  }
-
   const available = await isLightpandaAvailable(binary);
   if (available) {
     return;
   }
 
-  missingBackendWarned = true;
   if (ctx.hasUI) {
     ctx.ui.notify(
       `Lightpanda is missing. Call install-lightpanda, set LIGHTPANDA_BIN, or install it from ${LIGHTPANDA_INSTALL_URL}.`,
@@ -980,8 +972,7 @@ async function runPlaywrightFallback(ctx: ExtensionContext, url: string, toolNam
   } catch (error) {
     if (isMissingModuleError(error, "playwright")) {
       const reason = "Playwright is not available in the installed extension runtime.";
-      if (!playwrightWarned && ctx.hasUI) {
-        playwrightWarned = true;
+      if (ctx.hasUI) {
         ctx.ui.notify(reason, "warning");
       }
       return makeMissingPlaywrightResult(toolName, url, reason);
