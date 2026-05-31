@@ -1,208 +1,100 @@
-# Web-Search Extension — Crash Analysis & Fix Plan
+# Web-Search Extension — Crash Analysis & Fix Record
 
 > Source file: `src/extensions/web-search/web-search.ts`
-> Analyzed: 2026-05-30
+> Last updated: 2026-05-30
 
 ## Architecture Overview
 
-The extension uses a **3-tier fallback chain**:
+The extension uses a **streamlined 2-tier fallback chain** (SearXNG for search, Lightpanda for rendering, Playwright as final browser fallback).
 
 ```
-web-search/open-url execute()
-  → fetchWithFallback()
-    → Lightpanda (run() → fetchMarkdown)
-    → CDP Browser Fallback (runBrowserCdpFallback)
-    → Playwright Fallback (runPlaywrightFallback)
-    → Error result
+web-search:   SearXNG (auto-detect) → fetchWithFallback() → Lightpanda → Playwright
+open-url:     fetchWithFallback() → Lightpanda → Playwright
 ```
 
-The `run()` function at the heart of the extension is a wrapper around `child_process.spawn()` that resolves/rejects on process close. It has 12 call sites.
+The CDP browser fallback (hand-rolled raw WebSocket Chrome automation) was **removed** — it duplicated Playwright's functionality with more bug surface area.
 
 ---
 
-## 🔴 Crash Cause #1: `run()` has no timeout and no AbortSignal (INESCAPABLE HANG)
+## ✅ RESOLVED: Crash Cause #1 — `run()` had no timeout or AbortSignal
 
-**`run()` function (~line 142):**
+**Status: Fixed** (commit `00bb3b5`, later refined in the CDP removal rewrite)
 
-```typescript
-function run(command, args): Promise<{stdout, stderr}> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { ... });
-    child.on("close", (code) => {
-      if (code === 0) resolve(...);
-      else reject(...);
-    });
-  });
-  // No timeout. No abort listener. No child.kill() on cancel.
-}
-```
+The `run()` subprocess helper now accepts `RunOptions { signal?, timeoutMs? }`. When a signal fires or timeout expires, the child process receives `SIGTERM` → `SIGKILL` after 3s grace. The `execute()` handler in each tool registration passes `signal` through `fetchWithFallback()` → `fetchMarkdown()` → `run()`.
 
-**Problem:** When Lightpanda hangs (complex JS page, deadlock, segfault without clean exit):
-1. The promise never resolves or rejects
-2. ESC/Ctrl+C sets `signal.aborted = true`, but execution is stuck inside `await run(...)` — the scattered `signal?.aborted` checks **never execute** because we never return to the event loop
-3. The tool call is deadlocked forever — **un-escape-able**
-4. The Lightpanda process orphans into the background
-
-**Pi has `pi.exec()` that solves this** — it accepts `{ signal, timeout }` and properly kills the child process on abort or timeout. The extension built its own `run()` from scratch instead.
-
-**All `await run()` call sites (12 total):**
-
-| Call site | Location | Purpose |
-|-----------|----------|---------|
-| `fetchMarkdown()` | ~378 | Lightpanda fetch (primary render path) |
-| `httpGetJson()` | ~398 | cURL for CDP version endpoint |
-| `isLightpandaAvailable()` | ~322 | Binary check |
-| `isBrowserFallbackAvailable()` | ~332 | Binary check |
-| `resolveBrowserFallbackBinaries()` | ~369 | `which` command |
-| `installLightpanda()` | ~710-713 | mkdir, curl download, chmod, version check |
-| `setBrowserFallbackPath()` | ~776-777 | mkdir, bash write |
-| `runBrowserCdpFallback()` | ~810 | mkdir for CDP profile dir |
-| `runPlaywrightFallback()` | ~990 | mkdir for Playwright profile dir |
+All `await run()` call sites are wired.
 
 ---
 
-## 🔴 Crash Cause #2: AbortSignal doesn't kill subprocesses
+## ✅ RESOLVED: Crash Cause #2 — AbortSignal didn't kill subprocesses
 
-The `signal` parameter from `execute()` is **passed around but only polled** — never used to actually terminate anything:
+**Status: Fixed**
 
-| Call site | Passes signal? | Kills process on abort? |
-|-----------|---------------|-------------------------|
-| `execute()` → `fetchWithFallback()` | ✅ Passed | ❌ Only `signal?.aborted` checks |
-| `fetchMarkdown()` → `run()` | ❌ Not passed | ❌ No signal param in `run()` |
-| `runBrowserCdpFallback()` | ✅ Passed | ❌ Only checks at entry |
-| `runPlaywrightFallback()` | ✅ Passed | ❌ Only checks at entry |
+The `signal` parameter from `execute()` is now forwarded to `run()` for Lightpanda calls, and the Playwright fallback registers an abort listener that closes the browser context.
 
-Result: multiple aborted web-search calls orphan Lightpanda processes → memory/port exhaustion → actual crash.
+Previously, abort signals were only polled at scattered checkpoints — they never actually terminated anything.
 
 ---
 
-## 🔴 Crash Cause #3: CDP port collision
+## ✅ REMOVED: Crash Cause #3 — CDP port collision
 
-`runBrowserCdpFallback()` always binds to port **9222** (`BROWSER_FALLBACK_PORT`). No randomization. On concurrent calls:
+**Status: Removed along with CDP fallback**
 
-1. First call spawns browser on 9222
-2. Second call fails to bind → 5-second wasted poll loop
-3. First call's `finally` block sends `SIGTERM`, which may not kill headless Chrome cleanly
-4. Both browsers potentially orphaned
+The raw CDP browser fallback (`runBrowserCdpFallback`) was removed. This eliminates:
+- Port collision (was hardcoded 9222, later randomized)
+- Profile directory leak (was cleaned but less aggressively)
+- WebSocket connection management
+- Hand-rolled Chrome automation
 
-Only 1 place to fix: the `port` variable at ~807.
-
----
-
-## ⚠️ Crash Cause #4: Profile directory leak
-
-Each CDP and Playwright fallback creates a temp profile dir:
-- `~/.pi/agent/tmp/browser-cdp-{ts}-{random}`
-- `~/.pi/agent/tmp/browser-playwright-{ts}-{random}`
-
-The `finally` block only kills the process — **never `rm -rf`s the directory**. Accumulates indefinitely.
+Playwright handles all headless browser needs with proper profile management and port allocation.
 
 ---
 
-## ⚠️ Crash Cause #5: `onclose` doesn't drain event waiters
+## ✅ REMOVED: Crash Cause #4 — Profile directory leak (CDP)
 
-In `createCdpSocket()` (~line 430):
+**Status: Fixed (both Playwright and removed CDP)**
 
-```typescript
-socket.onclose = () => {
-  for (const record of pending.values()) {
-    record.reject(new Error(`CDP websocket closed: ...`));
-  }
-  pending.clear();
-  // ↑ Does NOT drain eventWaiters or sessionEventWaiters!
-};
-```
-
-Event waiters (e.g., `waitForSessionEvent("Page.loadEventFired", 20000)`) are left dangling — they won't resolve until their 20-second timeout. The timeout's `reject` and the waiter's `resolve` race on the same promise.
+The CDP fallback's profile directory leak is moot (code removed). Playwright's `finally` block cleans up its profile dir with `rmSync(profileDir, { recursive: true, force: true })`.
 
 ---
+
+## ✅ RESOLVED: Crash Cause #5 — `onclose` didn't drain event waiters
+
+**Status: Removed along with CDP fallback**
+
+The `createCdpSocket` WebSocket client was removed. No more event waiter drain issues.
+
+---
+
+## 🆕 ENHANCEMENT: SearXNG search backend
+
+SearXNG is now the preferred search backend. Auto-detected at `http://localhost:8888` when `WEBSEARCH_BACKEND=auto` (default). Returns structured `{title, snippet, url}` results via SearXNG's JSON API.
+
+If SearXNG is unavailable, falls through to Lightpanda (Bing HTML search), then Playwright.
+
+## 🆕 ENHANCEMENT: Result caching
+
+Simple file-based cache at `~/.pi/agent/cache/web-search/<hash>.json`:
+- Search results: 5-minute TTL
+- Page content: 1-hour TTL
+- Repeated queries return instantly from cache
+- Silently falls through on cache read/write errors
 
 ## ✅ What's Handled Well
 
-- Error catching in `fetchWithFallback` — both the `try` and catch-block paths try CDP → Playwright → error result
-- `runBrowserCdpFallback` wraps everything in try/catch/finally
+- `fetchWithFallback()` orchestrator: clean SearXNG → Lightpanda → Playwright → Error flow
+- `run()` has proper abort/timeout cleanup
+- Error catching in all fallback stages — each tier degrades gracefully
 - `isMissingModuleError` catches Playwright module-not-found correctly
-- Fallback chain logic (Lightpanda → CDP → Playwright → error) is sound
-- Most error paths return a `ToolOutput` instead of throwing
+- SearXNG detection is non-blocking (probe on first search, not startup)
+- Caching is transparent and doesn't break on errors
 
----
+## 📋 Remaining Work (Next Steps)
 
-## 📋 Fix Plan (Priority Order)
-
-### P1 — Make hangs escape-able (replace `run()` with abort-aware helper)
-
-Replace all `await run(...)` with a new helper or `pi.exec()` that:
-
-1. Accepts `AbortSignal` — calls `child.kill('SIGTERM')` when abort fires, then `SIGKILL` after a grace period
-2. Accepts a timeout — same kill behavior if process exceeds limit
-3. Properly cleans up signal listeners (removeEventListener after resolution)
-4. Returns the same `{ stdout, stderr }` shape
-
-**Option A** (simplest): Use `pi.exec(command, args, { signal, timeout })` — pi's built-in API already handles both.
-**Option B** (more control): Add `signal` and `timeout` parameters to `run()`.
-
-Either way, wire the `signal` from `execute()` → `fetchWithFallback()` → `fetchMarkdown()` → `run()`.
-
-**Files to change:** `web-search.ts`
-- `run()` function signature and implementation
-- `execute()` handler passes `signal` to `fetchWithFallback()`
-- All 12 call sites (add signal param where appropriate, timeout for user-facing calls)
-
-### P1 — Add AbortSignal termination to `spawnDetached`
-
-In `runBrowserCdpFallback`, add `signal.addEventListener('abort', () => browserProcess.child.kill('SIGKILL'))` so cancellation actually terminates the CDP browser.
-
-### P2 — Add AbortSignal to Playwright
-
-In `runPlaywrightFallback`, wire `signal` into `page.goto()` timeout and context cleanup.
-
-### P2 — Randomize CDP port
-
-Generate a random available high port instead of hardcoded 9222. Try a random port in range 49152-65535.
-
-**Where:** ~line 807, the `port = BROWSER_FALLBACK_PORT` constant.
-
-### P3 — Clean up profile directories
-
-In `runBrowserCdpFallback`'s `finally` block and `runPlaywrightFallback`'s cleanup, add:
-```typescript
-try { rmSync(profileDir, { recursive: true, force: true }); } catch {}
-```
-
-### P3 — Drain event waiters on socket close
-
-In `createCdpSocket`'s `onclose`, iterate all `eventWaiters` and `sessionEventWaiters` and reject every pending waiter:
-```typescript
-for (const [method, waiters] of eventWaiters) {
-  for (const waiter of waiters) waiter(undefined);
-}
-eventWaiters.clear();
-// same for sessionEventWaiters
-```
-
-### P4 — Add tests
-
-Create `__tests__/` with vitest:
-- `run()` with abort signal → child kills
-- `run()` with timeout → child kills, rejection
-- `isBlockedOrChallenge()` edge cases
-- `createCdpSocket()` event dispatching
-- `getSearchUrl()` / `normalizeUrl()` input handling
-
----
-
-## Code Index
-
-| Symbol | Line (approx) | Purpose |
-|--------|---------------|---------|
-| `run()` | 142 | Core subprocess runner — no timeout, no abort |
-| `fetchMarkdown()` | 378 | Calls `run()` with Lightpanda fetch args |
-| `httpGetJson()` | 398 | Calls `run()` with curl |
-| `createCdpSocket()` | 405 | WebSocket CDP client — event/timeout race |
-| `dispatchEvent()` | 440 | Event dispatching for CDP messages |
-| `waitForEvent()` | 505 | Event waiter with timeout — race with resolve |
-| `waitForSessionEvent()` | 515 | Session-scoped event waiter — same race |
-| `runBrowserCdpFallback()` | 801 | CDP browser — port 9222 hardcoded |
-| `runPlaywrightFallback()` | 967 | Playwright — profile dir leak |
-| `fetchWithFallback()` | 1091 | Main orchestration — scattered signal checks |
-| `spawnDetached()` | 185 | Detached process spawn — no abort support |
+| Priority | Work | Notes |
+|---|---|---|
+| P2 | **Stealth patches** | `navigator.webdriver=false`, canvas randomization, fake plugins in Playwright |
+| P2 | **Search result parsing** | Extract `{title, snippet, url}` from Bing/Lightpanda HTML |
+| P3 | **Stagehand tier** | AI-driven browser for Turnstile/hCaptcha |
+| P3 | **Proxy support** | For residential IP / rate-limit evasion |
+| P4 | **Unit tests** | vitest for cache, error handling, fallback chain |

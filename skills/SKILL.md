@@ -7,28 +7,34 @@ description: Browser-backed web search using the web-search tool and Lightpanda.
 
 ## Overview
 
-This extension provides 5 tools for browser-backed web research:
+This extension provides 5 tools for web research, with a priority chain:
 
-1. **`web-search`** - Search the web via Lightpanda
-2. **`open-url`** - Open specific URLs directly
-3. **`install-lightpanda`** - Install Lightpanda backend
-4. **`install-playwright`** - Install Playwright/Chromium fallback
-5. **`set-browser-fallback`** - Configure browser path for CDP fallback
+```
+web-search:   SearXNG (if available) → Lightpanda → Playwright (fallback)
+open-url:     Lightpanda → Playwright (fallback)
+```
+
+- **SearXNG** is preferred for search — aggregates across 70+ engines, so if one blocks others still work. Auto-detects at `http://localhost:8888`.
+- **Lightpanda** is the primary renderer: fast, lightweight, no JavaScript.
+- **Playwright** is the final fallback for JavaScript-heavy or bot-protected sites.
+- **Results are cached** (5 min for search, 1 hour for pages) — repeated queries are instant.
 
 ## Quick Start
 
 ### Basic Search
 ```bash
 web-search --query "Yasaka Kanako"
+# → Tries SearXNG → falls through to Lightpanda/Bing → falls through to Playwright
 ```
 
 ### Direct URL Access
 ```bash
 open-url --url "https://en.wikipedia.org/wiki/Touhou_Project"
+# → Lightpanda → Playwright if needed
 ```
 
 ### Fallback Chain
-Tools automatically try: **Lightpanda → CDP Browser → Playwright/Chromium**
+Tools automatically try: **SearXNG (search only) → Lightpanda → Playwright**
 
 ## Detailed Tool Usage
 
@@ -39,17 +45,17 @@ Tools automatically try: **Lightpanda → CDP Browser → Playwright/Chromium**
 - Source-backed verification
 - Refining a query after noisy results
 
+**Fallback chain:**
+1. **SearXNG** — Returns parsed `{title, snippet, url}` results. Fast, structured, engine-diverse.
+2. **Lightpanda** — Renders Bing HTML search as markdown. Works for most queries.
+3. **Playwright** — Full browser automation. Handles JS-heavy or protected sites.
+
 **Workflow:**
 1. Start with a precise query
 2. Call `web-search` with the query
-3. Read the returned markdown results page
+3. Read the returned results
 4. If noisy, narrow with quoted phrases or `site:` filters
 5. Prefer checking linked sources before answering with high confidence
-
-**Example queries:**
-- `"Touhou Project" release dates`
-- `Yasaka Kanako site:en.touhouwiki.net`
-- `Playwright vs Selenium comparison 2024`
 
 ### 2. open-url
 **When to use:**
@@ -57,7 +63,9 @@ Tools automatically try: **Lightpanda → CDP Browser → Playwright/Chromium**
 - Search results point to a specific page
 - Need to inspect page content directly
 
-**Note:** If Lightpanda cannot render the page, automatically tries browser fallbacks.
+**Fallback chain:**
+1. **Lightpanda** — Fast rendering
+2. **Playwright** — If Lightpanda is blocked or can't handle JS
 
 ### 3. install-lightpanda
 **When to use:**
@@ -71,17 +79,16 @@ Tools automatically try: **Lightpanda → CDP Browser → Playwright/Chromium**
 
 ### 4. install-playwright
 **When to use:**
-- Final fallback reports Playwright is missing
+- Playwright fallback reports Playwright is missing
 - Need Chromium browser for difficult pages
 
 **What it does:**
 - Installs Playwright in the extension's package runtime
-- Downloads Chromium browser
-- Used as the final fallback when Lightpanda and CDP fail
+- Used as the final fallback when Lightpanda fails
 
 ### 5. set-browser-fallback
 **When to use:**
-- Automatic browser detection fails
+- Automatic browser detection for Playwright fails
 - You want to use a specific Chromium-based browser (Brave, Chrome, etc.)
 
 **Example:**
@@ -89,22 +96,31 @@ Tools automatically try: **Lightpanda → CDP Browser → Playwright/Chromium**
 set-browser-fallback --browserPath /usr/bin/brave-browser-stable
 ```
 
-## Backend Configuration
+## Configuration
 
 ### Environment Variables
 
 | Variable | Purpose | Default |
 |---|---|---|
 | `LIGHTPANDA_BIN` | Path to Lightpanda binary | `~/.pi/agent/bin/lightpanda` |
-| `WEBSEARCH_URL_TEMPLATE` | Search URL template | DuckDuckGo HTML |
-| `WEBSEARCH_CDP_PORT` | CDP browser port | `9222` |
-| `BROWSER_FALLBACK_BIN` | Browser for CDP/Playwright | Auto-detected |
+| `WEBSEARCH_URL_TEMPLATE` | Fallback search URL (when SearXNG is unavailable) | Bing HTML |
+| `WEBSEARCH_BACKEND` | Search backend: `auto`, `searxng`, or `bing` | `auto` |
+| `WEBSEARCH_SEARXNG_URL` | SearXNG instance URL | `http://localhost:8888` |
+| `BROWSER_FALLBACK_BIN` | Browser path for Playwright fallback | Auto-detected |
 
-### Search URL Template
+### Search Backend Selection
 
-Default: `https://html.duckduckgo.com/html/?q={query}`
+Set `WEBSEARCH_BACKEND` to control which search source is used:
 
-Custom: `export WEBSEARCH_URL_TEMPLATE="https://google.com/search?q={query}"`
+- **`auto`** (default) — Probes `http://localhost:8888` for SearXNG at search time. If found, uses it. Otherwise, falls back to the URL template.
+- **`searxng`** — Always use SearXNG. Fails if unreachable.
+- **`bing`** — Skip SearXNG, go straight to Lightpanda/Bing.
+
+Example:
+```bash
+export WEBSEARCH_BACKEND=searxng
+export WEBSEARCH_SEARXNG_URL=http://192.168.1.50:8888
+```
 
 ## Advanced Patterns
 
@@ -117,36 +133,46 @@ Custom: `export WEBSEARCH_URL_TEMPLATE="https://google.com/search?q={query}"`
 
 ### Handling Protected Sites (Cloudflare, etc.)
 - Lightpanda may fail on protected sites
-- CDP fallback may fail if browser doesn't support headless
-- Playwright with Chromium is most reliable for protected sites
+- Playwright is more reliable but still detectable
+- Truly locked-down sites (Turnstile) may need Stagehand (not yet implemented)
 - Wikipedia works well with all backends
-- Some wikis (Touhou Wiki) may block automated access
+- SearXNG handles search queries without ever hitting protected search pages
 
-### Troubleshooting
+### Understanding Cache
+- Results are cached automatically for 5 minutes (search) or 1 hour (pages)
+- Repeated queries to the same URL return instantly from cache
+- Cache location: `~/.pi/agent/cache/web-search/`
+- Clear by deleting the directory to force fresh fetches
 
-**"Lightpanda is not available":**
+### SearXNG Setup (Docker)
+```bash
+docker run -d -p 8888:8080 --name searxng searxng/searxng
+```
+Point `WEBSEARCH_SEARXNG_URL=http://localhost:8888` and the extension will auto-detect it.
+
+## Troubleshooting
+
+### "Lightpanda is not available"
 1. Run `install-lightpanda`
 2. Or set `LIGHTPANDA_BIN` manually
 3. Verify: `/path/to/lightpanda version`
 
-**"Playwright is not available":**
+### "Playwright is not available"
 1. Run `install-playwright`
 2. Check: `cd ~/.pi-extensions/web-search && npm list playwright`
 
-**"CDP fallback failed":**
-1. Configure browser: `set-browser-fallback --browserPath /path/to/browser`
-2. Verify browser supports CDP: `/path/to/browser --headless --remote-debugging-port=9222`
-
-**All fallbacks failed:**
+### All fallbacks failed
 - Site may have strong anti-bot protection
-- Try different User-Agent or wait before retrying
-- Check if site allows automated access
+- Try waiting before retrying
+- Consider setting up SearXNG for search queries
+- For particularly locked-down sites, manual browsing may be needed
 
 ## Notes
 
-- Tools return browser-rendered pages as markdown, not curated answers
+- Tools return rendered pages as markdown, not curated answers
+- SearXNG returns structured `{title, snippet, url}` results from 70+ engines
 - Use as a research step, then synthesize the result
 - No robots.txt compliance (designed for single targeted requests)
 - Lightpanda is fast but may not handle JavaScript-heavy pages
-- Playwright/Chromium handles JavaScript but is slower
+- Playwright handles JavaScript but is slower
 - For bulk scraping, use dedicated tools (this extension is for targeted research)
