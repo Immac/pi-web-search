@@ -17,7 +17,7 @@ The goal is not to build a general browser automation framework, an API-search p
 - **Package name:** `web-search`
 - **Extension entrypoint:** `src/extensions/web-search/index.ts`
 - **Implementation:** `src/extensions/web-search/web-search.ts`
-- **Matching skill:** `skills/web-search/SKILL.md`
+- **Matching skill:** `skills/SKILL.md`
 - **Supporting tool:** `install-lightpanda`
 - **Supporting tool:** `install-playwright`
 - **Configuration tool:** `set-browser-fallback`
@@ -161,7 +161,7 @@ This project is designed to remain:
 ## Environment Variables
 
 - `LIGHTPANDA_BIN` — path to the Lightpanda binary (overrides default `~/.pi/agent/bin/lightpanda`)
-- `WEBSEARCH_URL_TEMPLATE` — optional search URL template, defaulting to DuckDuckGo HTML search
+- `WEBSEARCH_URL_TEMPLATE` — optional search URL template, defaulting to Bing HTML search
 - `WEBSEARCH_CDP_PORT` — port for CDP browser fallback (default: 9222)
 - `BROWSER_FALLBACK_BIN` — explicit path to browser for CDP/Playwright fallback
 - `BRAVE_BIN` — path to Brave browser (legacy, use `BROWSER_FALLBACK_BIN` instead)
@@ -169,19 +169,9 @@ This project is designed to remain:
 - `CHROME_BIN` — path to Chrome browser
 - `GOOGLE_CHROME_BIN` — path to Google Chrome browser
 
-## Discrepancies Between Documentation and Code
+## Implementation Notes
 
-| **Aspect** | **ARCHITECTURE.md (Old)** | **Actual Code** | **Status** |
-|---|---|---|---|
-| **Number of tools** | "four custom tools" | 5 tools (`web-search`, `open-url`, `install-lightpanda`, `install-playwright`, `set-browser-fallback`) | ✅ Fixed in this update |
-| **open-url status** | "Planned fallback browse tool: `open-url`" | Fully implemented and working | ✅ Fixed in this update |
-| **Brave CDP** | "Future generic fallback: Brave via CDP only if..." | Already in `BROWSER_FALLBACK_CANDIDATES` array | ✅ Fixed in this update |
-| **Primary fallback** | "uses Brave browser (Chromium-based) as the primary fallback" | Playwright with Chromium (Brave CDP may fail on some systems) | ✅ Fixed in this update |
-| **Fallback order** | "Lightpanda → browser fallback → Playwright" | Lightpanda → CDP (with system browser) → Playwright (with system browser or its own Chromium) | ✅ Fixed in this update |
-| **robots.txt** | "robots.txt compliance removed" | Completely removed: no `--obey-robots` flag, no `"robotsblocked"` check | ✅ Fixed in this update |
-| **Environment variables** | Lists only `LIGHTPANDA_BIN`, `WEBSEARCH_URL_TEMPLATE` | Also uses `WEBSEARCH_CDP_PORT`, `BROWSER_FALLBACK_BIN`, `BRAVE_BIN`, etc. | ✅ Fixed in this update |
-| **Install Playwright behavior** | "download the Chromium browser used by the final fallback" | Actually downloads Chromium via `npx playwright install chromium` | ✅ Fixed in this update |
-| **CDP browser path** | Not clearly documented | Configured via `set-browser-fallback` tool, stored in `~/.pi/agent/web-search-browser-path.txt` | ✅ Fixed in this update |
+All discrepancies between the original ARCHITECTURE.md and the code have been resolved. The code accurately reflects the current design as described in this document.
 
 ## Next Steps
 
