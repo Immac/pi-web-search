@@ -125,30 +125,67 @@ export WEBSEARCH_SEARXNG_URL=http://192.168.1.50:8888
 ## Advanced Patterns
 
 ### Query Refinement Loop
+
+The fundamental research loop: search → inspect → refine → verify.
+
 ```
 1. web-search "Touhou Project"
-2. Results too broad → web-search "Touhou Project site:en.wikipedia.org"
-3. Need specific info → open-url "https://en.wikipedia.org/wiki/Mountain_of_Faith"
+   → Broad results. Identifies topics like "Mountain of Faith", "Yasaka Kanako"
+2. web-search "Yasaka Kanako site:en.wikipedia.org"
+   → Narrowed to Wikipedia. Finds exact article.
+3. open-url "https://en.wikipedia.org/wiki/Mountain_of_Faith"
+   → Full page content. Read for details.
 ```
+
+**Refinement techniques:**
+
+| Technique | Example | Effect |
+|---|---|---|
+| Exact phrase | `"climate change policy"` | Match words in order |
+| Exclude term | `jaguar -car` | Remove results about cars |
+| Site filter | `node.js site:developer.mozilla.org` | Limit to one domain |
+| File type | `report filetype:pdf` | Filter by format |
+| Intitle | `intitle:"API reference"` | Match title only |
+| Combine | `"Touhou" site:en.wikipedia.org -"List of"` | Narrow + exclude |
+
+### Result Format by Backend
+
+Knowing which backend served the result helps you interpret the output:
+
+| Backend | Output Format | Content Quality | Speed |
+|---|---|---|---|
+| **SearXNG** | Structured `{title, snippet, url}` per result. Source engine noted. | Snippets may truncate. Consistently formatted. | Fastest (~1-3s) |
+| **Lightpanda** | Rendered page → plain markdown. Full HTML stripped to text. | Complete page text. May lose table structures. | Fast (~3-5s) |
+| **Playwright** | Full browser render → `innerText` or fallback HTML→markdown | Highest fidelity, handles JS. Slower. | Slow (~5-15s) |
+
+SearXNG results include `*(via engine_name)` per link — this tells you which of 70+ engines contributed that result. If a specific engine is unreliable, you know which results to treat with caution.
 
 ### Handling Protected Sites (Cloudflare, etc.)
 - Lightpanda may fail on protected sites
 - Playwright is more reliable but still detectable
-- Truly locked-down sites (Turnstile) may need Stagehand (not yet implemented)
+- Truly locked-down sites (Turnstile) may need manual browsing
 - Wikipedia works well with all backends
 - SearXNG handles search queries without ever hitting protected search pages
+- If all automated backends fail on a search: try SearXNG as a backend (it aggregates across engines many of which won't trigger protections)
 
-### Understanding Cache
-- Results are cached automatically for 5 minutes (search) or 1 hour (pages)
-- Repeated queries to the same URL return instantly from cache
-- Cache location: `~/.pi/agent/cache/web-search/`
-- Clear by deleting the directory to force fresh fetches
+### Performance & Cache Strategy
+
+- **SearXNG** is the fastest path — aim for this as your default search backend
+- **Cached results** serve instantly — repeat a query you ran 2 minutes ago with no network cost
+- **Cache TTL**: 5 minutes for searches, 1 hour for pages
+- If you need fresh results: either wait for TTL expiry, or delete the cache directory
+- **Cache location**: `~/.pi/agent/cache/web-search/`
+- **Clear cache**: `rm -rf ~/.pi/agent/cache/web-search/`
 
 ### SearXNG Setup (Docker)
 ```bash
 docker run -d -p 8888:8080 --name searxng searxng/searxng
 ```
 Point `WEBSEARCH_SEARXNG_URL=http://localhost:8888` and the extension will auto-detect it.
+
+### Browser Detection Cache
+
+The extension caches the result of browser detection for Playwright fallback. If you install a new browser while pi is running, restart pi (or reload the extension) to pick it up. The cache avoids re-probing all system binaries on every Playwright attempt.
 
 ## Troubleshooting
 
@@ -160,14 +197,25 @@ Point `WEBSEARCH_SEARXNG_URL=http://localhost:8888` and the extension will auto-
 ### "Playwright is not available"
 1. Run `install-playwright`
 2. Check: `cd ~/.pi-extensions/web-search && npm list playwright`
+3. Ensure browser binaries are installed: `npx playwright install chromium`
+
+### SearXNG not detected
+1. Verify SearXNG is running: `curl http://localhost:8888/search?q=test&format=json`
+2. Check `WEBSEARCH_SEARXNG_URL` is correct
+3. Try setting `WEBSEARCH_BACKEND=searxng` explicitly
+4. Docker: `docker ps` to verify the container is running
 
 ### All fallbacks failed
 - Site may have strong anti-bot protection
 - Try waiting before retrying
-- Consider setting up SearXNG for search queries
+- Consider setting up SearXNG for search queries (bypasses protected search pages entirely)
 - For particularly locked-down sites, manual browsing may be needed
 
-## Notes
+### "Results look stale"
+- Cache TTL is 5 min for searches, 1 hour for pages
+- Force a fresh fetch: `rm -rf ~/.pi/agent/cache/web-search/`
+
+## Development Notes
 
 - Tools return rendered pages as markdown, not curated answers
 - SearXNG returns structured `{title, snippet, url}` results from 70+ engines
@@ -176,3 +224,5 @@ Point `WEBSEARCH_SEARXNG_URL=http://localhost:8888` and the extension will auto-
 - Lightpanda is fast but may not handle JavaScript-heavy pages
 - Playwright handles JavaScript but is slower
 - For bulk scraping, use dedicated tools (this extension is for targeted research)
+- The extension has unit tests under `__tests__/` — run them with `npm test`
+- After modifying the extension, validate with `npm run validate` and `npm test`

@@ -71,18 +71,20 @@ function buildReleaseUrl(assetName: string): string {
 }
 
 // Simple hash for cache keys (no crypto dependency needed)
+// Uses DJB2 algorithm with unsigned 32-bit cast via >>> 0
 function simpleHash(str: string): string {
   let hash = 5381;
   for (let i = 0; i < str.length; i++) {
     hash = ((hash << 5) + hash) + str.charCodeAt(i);
-    hash = hash & hash; // Convert to 32-bit int
+    hash = (hash & hash) >>> 0; // Convert to unsigned 32-bit int
   }
-  return Math.abs(hash).toString(16);
+  return hash.toString(16);
 }
 
 function cacheRead(url: string): ToolOutput | undefined {
   const path = join(CACHE_DIR, `${simpleHash(url)}.json`);
   try {
+    mkdirSync(CACHE_DIR, { recursive: true });
     const data = JSON.parse(readFileSync(path, "utf8")) as { url: string; result: ToolOutput; cachedAt: number };
     const ttl = data.url.startsWith("http") && data.url.includes("/search?") ? CACHE_TTL_MS : CACHE_TTL_MS * 12;
     if (Date.now() - data.cachedAt < ttl) return data.result;
@@ -186,6 +188,18 @@ async function isSearxngAvailable(searxngUrl: string): Promise<boolean> {
   } catch { return false; }
 }
 
+// Safe string coercion for JSON API responses
+function safeStr(v: unknown): string {
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  return "";
+}
+
+function safeStrArray(arr: unknown): string[] {
+  if (!Array.isArray(arr)) return [];
+  return arr.filter((x): x is string => typeof x === "string");
+}
+
 async function searchSearxng(
   query: string,
   searxngUrl: string,
@@ -197,17 +211,34 @@ async function searchSearxng(
   // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
   const data: Record<string, unknown> = JSON.parse(res.stdout);
 
-  const results = (data.results as Array<Record<string, string>>) || [];
-  const answers = (data.answers as string[]) || [];
-  const suggestions = (data.suggestions as string[]) || [];
-  const infoboxes = (data.infoboxes as Array<Record<string, string>>) || [];
-  const unresponsive = (data.unresponsive_engines as string[]) || [];
-  const numResults = data.number_of_results as number | undefined;
+  const rawResults = data.results;
+  const results: Array<Record<string, string>> = Array.isArray(rawResults)
+    ? rawResults.map((item: unknown) => {
+        const obj = (item && typeof item === "object") ? item as Record<string, unknown> : {};
+        return {
+          title: safeStr(obj.title),
+          url: safeStr(obj.url),
+          content: safeStr(obj.content),
+          engine: safeStr(obj.engine),
+        };
+      })
+    : [];
+  const answers = safeStrArray(data.answers);
+  const suggestions = safeStrArray(data.suggestions);
+  const unresponsive = safeStrArray(data.unresponsive_engines);
+  const rawInfoboxes = data.infoboxes;
+  const infoboxes: Array<{ infobox: string; content: string }> = Array.isArray(rawInfoboxes)
+    ? rawInfoboxes.map((item: unknown) => {
+        const obj = (item && typeof item === "object") ? item as Record<string, unknown> : {};
+        return { infobox: safeStr(obj.infobox), content: safeStr(obj.content) };
+      })
+    : [];
+  const numResults = typeof data.number_of_results === "number" ? data.number_of_results : undefined;
 
   const lines: string[] = [];
   if (infoboxes.length) {
     for (const box of infoboxes) {
-      lines.push(`> **${box.infobox || ""}** — ${box.content || ""}`);
+      lines.push(`> **${box.infobox}** — ${box.content}`);
     }
     lines.push("");
   }
@@ -242,11 +273,22 @@ async function isBrowserAvailable(binary: string): Promise<boolean> {
   }
 }
 
+let _cachedBrowserBinary: string | undefined;
+let _browserProbed = false;
+
 async function resolveBrowserFallbackBinary(): Promise<string | undefined> {
+  if (_browserProbed) return _cachedBrowserBinary;
+  _browserProbed = true;
   const configured = readBrowserFallbackPath();
-  if (configured && (await isBrowserAvailable(configured))) return configured;
+  if (configured && (await isBrowserAvailable(configured))) {
+    _cachedBrowserBinary = configured;
+    return _cachedBrowserBinary;
+  }
   for (const name of ["brave", "brave-browser", "brave-browser-stable", "google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]) {
-    if (await isBrowserAvailable(name)) return name;
+    if (await isBrowserAvailable(name)) {
+      _cachedBrowserBinary = name;
+      return _cachedBrowserBinary;
+    }
   }
   return undefined;
 }
@@ -311,10 +353,10 @@ async function runPlaywrightFallback(
 
   const browserBinary = await resolveBrowserFallbackBinary();
   const profileDir = join(homedir(), ".pi", "agent", "tmp", `browser-pw-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-  await run("mkdir", ["-p", profileDir]);
 
   let context: Awaited<ReturnType<typeof chromium.launchPersistentContext>> | undefined;
   try {
+    await run("mkdir", ["-p", profileDir]);
     const launchOptions: {
       executablePath?: string;
       headless: boolean;
@@ -517,8 +559,8 @@ async function setBrowserFallbackPath(ctx: ExtensionContext, params: ConfigureBr
       details: { configured: false },
     };
   }
-  await run("mkdir", ["-p", join(homedir(), ".pi", "agent")]);
-  await run("bash", ["-lc", `printf '%s' ${JSON.stringify(path)} > ${JSON.stringify(BROWSER_FALLBACK_CONFIG_PATH)}`]);
+  mkdirSync(join(homedir(), ".pi", "agent"), { recursive: true });
+  writeFileSync(BROWSER_FALLBACK_CONFIG_PATH, path, "utf8");
   if (ctx.hasUI) ctx.ui.notify(`Browser fallback saved: ${path}`, "info");
   return {
     content: [{ type: "text", text: `# Browser fallback configured\n\nPath: ${path}\nPlaywright will use this browser.` }],
