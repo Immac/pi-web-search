@@ -530,8 +530,8 @@ async function setBrowserFallbackPath(ctx: ExtensionContext, params: ConfigureBr
       details: { configured: false },
     };
   }
-  await run("mkdir", ["-p", join(homedir(), ".pi", "agent")]);
-  await run("bash", ["-lc", `printf '%s' ${JSON.stringify(path)} > ${JSON.stringify(BROWSER_FALLBACK_CONFIG_PATH)}`]);
+  mkdirSync(join(homedir(), ".pi", "agent"), { recursive: true });
+  writeFileSync(BROWSER_FALLBACK_CONFIG_PATH, path, "utf8");
   if (ctx.hasUI) ctx.ui.notify(`Browser fallback saved: ${path}`, "info");
   return {
     content: [{ type: "text", text: `# Browser fallback configured\n\nPath: ${path}\nPlaywright will use this browser.` }],
