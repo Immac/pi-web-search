@@ -183,7 +183,7 @@ async function fetchMarkdown(
 // ── SearXNG ────────────────────────────────────────────────────────────
 async function isSearxngAvailable(searxngUrl: string): Promise<boolean> {
   try {
-    await run("curl", ["-fsSL", "-o", "/dev/null", "--max-time", "3", `${searxngUrl}/search?q=test&format=json`]);
+    await run("curl", ["-fsSL", "-o", "/dev/null", "--max-time", "5", `${searxngUrl}/search?q=test&format=json`]);
     return true;
   } catch { return false; }
 }
