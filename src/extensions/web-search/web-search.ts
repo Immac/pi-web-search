@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -103,12 +104,8 @@ function readBrowserFallbackPath(): string | undefined {
   }
 
   try {
-    const fs = require("node:fs") as {
-      existsSync(path: string): boolean;
-      readFileSync(path: string, encoding: string): string;
-    };
-    if (fs.existsSync(BROWSER_FALLBACK_CONFIG_PATH)) {
-      const value = fs.readFileSync(BROWSER_FALLBACK_CONFIG_PATH, "utf8").trim();
+    if (existsSync(BROWSER_FALLBACK_CONFIG_PATH)) {
+      const value = readFileSync(BROWSER_FALLBACK_CONFIG_PATH, "utf8").trim();
       return value || undefined;
     }
   } catch {
@@ -251,12 +248,8 @@ function makeMissingPlaywrightResult(toolName: string, url: string, reason: stri
 
 async function installPlaywrightRuntime(ctx: ExtensionContext, options: InstallParams): Promise<ToolOutput> {
   const packageJsonPath = `${PACKAGE_ROOT}/package.json`;
-  const { spawnSync } = require("node:child_process") as {
-    spawnSync(command: string, args: string[], options?: { cwd?: string; env?: Record<string, string | undefined>; stdio?: string; encoding?: string }): { status: number | null; stdout: string; stderr: string };
-  };
-  const fs = require("node:fs") as { existsSync(path: string): boolean };
 
-  if (!fs.existsSync(packageJsonPath)) {
+  if (!existsSync(packageJsonPath)) {
     return {
       content: [
         {
