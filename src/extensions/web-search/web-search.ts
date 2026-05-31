@@ -71,18 +71,20 @@ function buildReleaseUrl(assetName: string): string {
 }
 
 // Simple hash for cache keys (no crypto dependency needed)
+// Uses DJB2 algorithm with unsigned 32-bit cast via >>> 0
 function simpleHash(str: string): string {
   let hash = 5381;
   for (let i = 0; i < str.length; i++) {
     hash = ((hash << 5) + hash) + str.charCodeAt(i);
-    hash = hash & hash; // Convert to 32-bit int
+    hash = (hash & hash) >>> 0; // Convert to unsigned 32-bit int
   }
-  return Math.abs(hash).toString(16);
+  return hash.toString(16);
 }
 
 function cacheRead(url: string): ToolOutput | undefined {
   const path = join(CACHE_DIR, `${simpleHash(url)}.json`);
   try {
+    mkdirSync(CACHE_DIR, { recursive: true });
     const data = JSON.parse(readFileSync(path, "utf8")) as { url: string; result: ToolOutput; cachedAt: number };
     const ttl = data.url.startsWith("http") && data.url.includes("/search?") ? CACHE_TTL_MS : CACHE_TTL_MS * 12;
     if (Date.now() - data.cachedAt < ttl) return data.result;
