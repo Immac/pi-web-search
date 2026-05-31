@@ -313,10 +313,10 @@ async function runPlaywrightFallback(
 
   const browserBinary = await resolveBrowserFallbackBinary();
   const profileDir = join(homedir(), ".pi", "agent", "tmp", `browser-pw-${Date.now()}-${Math.random().toString(16).slice(2)}`);
-  await run("mkdir", ["-p", profileDir]);
 
   let context: Awaited<ReturnType<typeof chromium.launchPersistentContext>> | undefined;
   try {
+    await run("mkdir", ["-p", profileDir]);
     const launchOptions: {
       executablePath?: string;
       headless: boolean;
