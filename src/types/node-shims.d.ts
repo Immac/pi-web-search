@@ -27,6 +27,7 @@ declare module "node:child_process" {
 declare module "node:fs" {
   export function existsSync(path: string): boolean;
   export function readFileSync(path: string, encoding: string): string;
+  export function rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
 }
 
 declare module "node:os" {
@@ -73,10 +74,13 @@ declare interface ImportMeta {
 }
 
 declare function setTimeout(handler: (...args: unknown[]) => void, timeout?: number, ...args: unknown[]): unknown;
+declare function clearTimeout(id: unknown): void;
 
 declare class AbortSignal {
   readonly aborted: boolean;
   readonly reason: unknown;
+  addEventListener(type: "abort", listener: () => void): void;
+  removeEventListener(type: "abort", listener: () => void): void;
 }
 
 declare interface Error {

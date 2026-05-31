@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,6 +37,11 @@ type CdpResponse = {
   error?: { message?: string };
 };
 
+type RunOptions = {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+};
+
 type CdpSocket = {
   call(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>;
   callSession(sessionId: string, method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>>;
@@ -49,7 +54,6 @@ const DEFAULT_SEARCH_URL = "https://www.bing.com/search?q={query}";
 const LIGHTPANDA_INSTALL_URL = "https://github.com/lightpanda-io/browser";
 const LIGHTPANDA_BINARY_NAME = "lightpanda";
 const LIGHTPANDA_INSTALL_PATH = join(homedir(), ".pi", "agent", "bin", LIGHTPANDA_BINARY_NAME);
-const BROWSER_FALLBACK_PORT = Number(process.env.WEBSEARCH_CDP_PORT?.trim() || "9222");
 const BROWSER_FALLBACK_CONFIG_PATH = join(homedir(), ".pi", "agent", "web-search-browser-path.txt");
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(MODULE_DIR, "../../..");
@@ -129,7 +133,7 @@ function buildReleaseUrl(assetName: string): string {
   return `https://github.com/lightpanda-io/browser/releases/download/nightly/${assetName}`;
 }
 
-function run(command: string, args: string[], cwd?: string): Promise<{ stdout: string; stderr: string }> {
+function run(command: string, args: string[], cwd?: string, options?: RunOptions): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd,
@@ -139,6 +143,7 @@ function run(command: string, args: string[], cwd?: string): Promise<{ stdout: s
 
     let stdout = "";
     let stderr = "";
+    let killed = false;
 
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
@@ -150,11 +155,57 @@ function run(command: string, args: string[], cwd?: string): Promise<{ stdout: s
       stderr += String(chunk);
     });
 
+    const cleanup: Array<() => void> = [];
+
+    if (options?.signal) {
+      const onAbort = () => {
+        killed = true;
+        child.kill("SIGTERM");
+        // SIGKILL after grace period if still alive
+        setTimeout(() => {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            // process already dead
+          }
+        }, 3000);
+      };
+      if (options.signal.aborted) {
+        onAbort();
+      } else {
+        options.signal.addEventListener("abort", onAbort);
+        cleanup.push(() => options.signal!.removeEventListener("abort", onAbort));
+      }
+    }
+
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    if (options?.timeoutMs && options.timeoutMs > 0) {
+      timeoutId = setTimeout(() => {
+        killed = true;
+        child.kill("SIGTERM");
+        setTimeout(() => {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            // process already dead
+          }
+        }, 3000);
+      }, options.timeoutMs);
+    }
+
     child.on("error", (error: unknown) => {
+      cleanup.forEach((fn) => fn());
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
       reject(error instanceof Error ? error : new Error(String(error)));
     });
 
     child.on("close", (code: unknown) => {
+      cleanup.forEach((fn) => fn());
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
+      if (killed) {
+        reject(new Error("Process was terminated"));
+        return;
+      }
       if (code === 0) {
         resolve({ stdout, stderr });
         return;
@@ -382,7 +433,7 @@ async function resolveBrowserFallbackBinaries(): Promise<string[]> {
 }
 
 
-async function fetchMarkdown(binary: string, url: string): Promise<{ stdout: string; stderr: string }> {
+async function fetchMarkdown(binary: string, url: string, options?: RunOptions): Promise<{ stdout: string; stderr: string }> {
   return run(binary, [
     "fetch",
     "--dump",
@@ -392,11 +443,11 @@ async function fetchMarkdown(binary: string, url: string): Promise<{ stdout: str
     "--log-level",
     "error",
     url,
-  ]);
+  ], undefined, options);
 }
 
-async function httpGetJson(url: string): Promise<Record<string, unknown>> {
-  const result = await run("curl", ["-fsSL", url]);
+async function httpGetJson(url: string, options?: RunOptions): Promise<Record<string, unknown>> {
+  const result = await run("curl", ["-fsSL", url], undefined, options);
   return JSON.parse(result.stdout) as Record<string, unknown>;
 }
 
@@ -470,6 +521,23 @@ function createCdpSocket(webSocketUrl: string): CdpSocket {
       record.reject(new Error(`CDP websocket closed: ${webSocketUrl}`));
     }
     pending.clear();
+
+    // Drain event waiters so they don't hang until timeout
+    for (const [method, waiters] of eventWaiters) {
+      for (const waiter of waiters) {
+        waiter(undefined);
+      }
+    }
+    eventWaiters.clear();
+
+    for (const [, perSession] of sessionEventWaiters) {
+      for (const [, waiters] of perSession) {
+        for (const waiter of waiters) {
+          waiter(undefined);
+        }
+      }
+    }
+    sessionEventWaiters.clear();
   };
 
   async function call(method: string, params?: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -805,7 +873,8 @@ async function runBrowserCdpFallback(url: string, toolName: string, signal?: Abo
     return undefined;
   }
 
-  const port = BROWSER_FALLBACK_PORT;
+  // Use random high port unless env var is set to avoid collisions
+  const port = Number(process.env.WEBSEARCH_CDP_PORT?.trim()) || (49152 + Math.floor(Math.random() * 16384));
   const profileDir = join(homedir(), ".pi", "agent", "tmp", `browser-cdp-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   await run("mkdir", ["-p", profileDir]);
 
@@ -830,13 +899,23 @@ async function runBrowserCdpFallback(url: string, toolName: string, signal?: Abo
     "about:blank",
   ]);
 
+  const abortBrowser = () => {
+    try {
+      browserProcess.child.kill("SIGKILL");
+    } catch {
+      // process already dead
+    }
+  };
+  signal?.addEventListener("abort", abortBrowser);
+
   try {
     const versionInfo = await (async () => {
-      const deadline = Date.now() + 5000; // Reduced timeout
+      const deadline = Date.now() + 5000;
       while (Date.now() < deadline) {
         try {
-          return await httpGetJson(`http://127.0.0.1:${port}/json/version`);
+          return await httpGetJson(`http://127.0.0.1:${port}/json/version`, { signal });
         } catch {
+          if (signal?.aborted) throw new Error("Aborted by caller");
           await sleep(250);
         }
       }
@@ -956,8 +1035,22 @@ async function runBrowserCdpFallback(url: string, toolName: string, signal?: Abo
       },
     };
   } finally {
+    signal?.removeEventListener("abort", abortBrowser);
     try {
       browserProcess.child.kill("SIGTERM");
+      setTimeout(() => {
+        try {
+          browserProcess.child.kill("SIGKILL");
+        } catch {
+          // already dead
+        }
+      }, 2000);
+    } catch {
+      // ignore cleanup errors
+    }
+    // Clean up profile directory
+    try {
+      rmSync(profileDir, { recursive: true, force: true });
     } catch {
       // ignore cleanup errors
     }
@@ -990,6 +1083,7 @@ async function runPlaywrightFallback(ctx: ExtensionContext, url: string, toolNam
     await run("mkdir", ["-p", profileDir]);
 
     let context: Awaited<ReturnType<typeof chromium.launchPersistentContext>> | undefined;
+    let pageOpened = false;
     try {
       const launchOptions: {
         executablePath?: string;
@@ -1011,6 +1105,20 @@ async function runPlaywrightFallback(ctx: ExtensionContext, url: string, toolNam
       launchOptions.executablePath = browserBinary;
 
       context = await chromium.launchPersistentContext(profileDir, launchOptions);
+      pageOpened = true;
+
+      // Close context on abort
+      if (signal) {
+        const onAbort = () => {
+          context?.close().catch(() => undefined);
+        };
+        signal.addEventListener("abort", onAbort);
+        // Clean up listener when done
+        const cleanup = onAbort;
+        // We'll remove it after we're done
+        setTimeout(() => signal.removeEventListener("abort", cleanup), 60000);
+      }
+
       const page = context.pages()[0] ?? (await context.newPage());
 
       await page.goto(url, { waitUntil: "domcontentloaded", timeout: 20000 });
@@ -1058,8 +1166,17 @@ async function runPlaywrightFallback(ctx: ExtensionContext, url: string, toolNam
       };
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
-      await context?.close().catch(() => undefined);
+      if (pageOpened) {
+        await context?.close().catch(() => undefined);
+      }
       continue;
+    } finally {
+      // Clean up profile directory
+      try {
+        rmSync(profileDir, { recursive: true, force: true });
+      } catch {
+        // ignore cleanup errors
+      }
     }
   }
 
@@ -1101,7 +1218,7 @@ async function fetchWithFallback(toolName: string, url: string, ctx: ExtensionCo
   try {
     if (signal?.aborted) return { content: [{ type: 'text', text: '# Aborted by caller' }], details: { url, rendered: false, error: 'Aborted' } };
 
-    const result = await fetchMarkdown(lightpandaBinary, url);
+    const result = await fetchMarkdown(lightpandaBinary, url, { signal, timeoutMs: 30000 });
     const body = result.stdout.trim();
     const stderr = result.stderr.trim();
 
