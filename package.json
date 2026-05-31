@@ -3,15 +3,25 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "pi": {
-    "extensions": ["./src/extensions/web-search/index.ts"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./src/extensions/web-search/index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
   "dependencies": {
     "playwright": "^1.53.2"
   },
   "scripts": {
-    "validate": "tsc -p tsconfig.json --noEmit"
+    "validate": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "4.1.7"
   }
 }
