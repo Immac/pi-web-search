@@ -244,11 +244,22 @@ async function isBrowserAvailable(binary: string): Promise<boolean> {
   }
 }
 
+let _cachedBrowserBinary: string | undefined;
+let _browserProbed = false;
+
 async function resolveBrowserFallbackBinary(): Promise<string | undefined> {
+  if (_browserProbed) return _cachedBrowserBinary;
+  _browserProbed = true;
   const configured = readBrowserFallbackPath();
-  if (configured && (await isBrowserAvailable(configured))) return configured;
+  if (configured && (await isBrowserAvailable(configured))) {
+    _cachedBrowserBinary = configured;
+    return _cachedBrowserBinary;
+  }
   for (const name of ["brave", "brave-browser", "brave-browser-stable", "google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]) {
-    if (await isBrowserAvailable(name)) return name;
+    if (await isBrowserAvailable(name)) {
+      _cachedBrowserBinary = name;
+      return _cachedBrowserBinary;
+    }
   }
   return undefined;
 }
