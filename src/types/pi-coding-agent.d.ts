@@ -1,4 +1,4 @@
-declare module "@mariozechner/pi-coding-agent" {
+declare module "@earendil-works/pi-coding-agent" {
   export interface ExtensionUIContext {
     notify(message: string, type?: "info" | "warning" | "error"): void;
     confirm(title: string, message: string): Promise<boolean>;

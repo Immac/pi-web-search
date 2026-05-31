@@ -1,7 +1,9 @@
-import { spawn } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 type SearchParams = {
   query: string;
@@ -46,9 +48,9 @@ type CdpSocket = {
 const DEFAULT_SEARCH_URL = "https://www.bing.com/search?q={query}";
 const LIGHTPANDA_INSTALL_URL = "https://github.com/lightpanda-io/browser";
 const LIGHTPANDA_BINARY_NAME = "lightpanda";
-const LIGHTPANDA_INSTALL_PATH = `${getHomeDir()}/.pi/agent/bin/${LIGHTPANDA_BINARY_NAME}`;
+const LIGHTPANDA_INSTALL_PATH = join(homedir(), ".pi", "agent", "bin", LIGHTPANDA_BINARY_NAME);
 const BROWSER_FALLBACK_PORT = Number(process.env.WEBSEARCH_CDP_PORT?.trim() || "9222");
-const BROWSER_FALLBACK_CONFIG_PATH = `${getHomeDir()}/.pi/agent/web-search-browser-path.txt`;
+const BROWSER_FALLBACK_CONFIG_PATH = join(homedir(), ".pi", "agent", "web-search-browser-path.txt");
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(MODULE_DIR, "../../..");
 const BROWSER_FALLBACK_CANDIDATES = [
@@ -65,13 +67,6 @@ const BROWSER_FALLBACK_CANDIDATES = [
   "chromium",
   "chromium-browser",
 ].filter((value): value is string => Boolean(value));
-
-let missingBackendWarned = false;
-let playwrightWarned = false;
-
-function getHomeDir(): string {
-  return process.env.HOME?.trim() || process.env.USERPROFILE?.trim() || process.cwd();
-}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -103,12 +98,8 @@ function readBrowserFallbackPath(): string | undefined {
   }
 
   try {
-    const fs = require("node:fs") as {
-      existsSync(path: string): boolean;
-      readFileSync(path: string, encoding: string): string;
-    };
-    if (fs.existsSync(BROWSER_FALLBACK_CONFIG_PATH)) {
-      const value = fs.readFileSync(BROWSER_FALLBACK_CONFIG_PATH, "utf8").trim();
+    if (existsSync(BROWSER_FALLBACK_CONFIG_PATH)) {
+      const value = readFileSync(BROWSER_FALLBACK_CONFIG_PATH, "utf8").trim();
       return value || undefined;
     }
   } catch {
@@ -251,12 +242,8 @@ function makeMissingPlaywrightResult(toolName: string, url: string, reason: stri
 
 async function installPlaywrightRuntime(ctx: ExtensionContext, options: InstallParams): Promise<ToolOutput> {
   const packageJsonPath = `${PACKAGE_ROOT}/package.json`;
-  const { spawnSync } = require("node:child_process") as {
-    spawnSync(command: string, args: string[], options?: { cwd?: string; env?: Record<string, string | undefined>; stdio?: string; encoding?: string }): { status: number | null; stdout: string; stderr: string };
-  };
-  const fs = require("node:fs") as { existsSync(path: string): boolean };
 
-  if (!fs.existsSync(packageJsonPath)) {
+  if (!existsSync(packageJsonPath)) {
     return {
       content: [
         {
@@ -648,16 +635,11 @@ function makeFetchFailureResult(toolName: string, target: string, error: unknown
 }
 
 async function warnIfMissingBackend(ctx: ExtensionContext, binary: string): Promise<void> {
-  if (missingBackendWarned) {
-    return;
-  }
-
   const available = await isLightpandaAvailable(binary);
   if (available) {
     return;
   }
 
-  missingBackendWarned = true;
   if (ctx.hasUI) {
     ctx.ui.notify(
       `Lightpanda is missing. Call install-lightpanda, set LIGHTPANDA_BIN, or install it from ${LIGHTPANDA_INSTALL_URL}.`,
@@ -710,7 +692,7 @@ async function installLightpanda(ctx: ExtensionContext, options: InstallParams):
   }
 
   const downloadUrl = buildReleaseUrl(assetName);
-  const destinationDir = `${getHomeDir()}/.pi/agent/bin`;
+  const destinationDir = join(homedir(), ".pi", "agent", "bin");
 
   if (ctx.hasUI) {
     const ok = await ctx.ui.confirm(
@@ -791,7 +773,7 @@ async function setBrowserFallbackPath(ctx: ExtensionContext, params: ConfigureBr
     };
   }
 
-  await run("mkdir", ["-p", `${getHomeDir()}/.pi/agent`]);
+  await run("mkdir", ["-p", join(homedir(), ".pi", "agent")]);
   await run("bash", ["-lc", `printf '%s' ${JSON.stringify(path)} > ${JSON.stringify(BROWSER_FALLBACK_CONFIG_PATH)}`]);
 
   if (ctx.hasUI) {
@@ -824,7 +806,7 @@ async function runBrowserCdpFallback(url: string, toolName: string, signal?: Abo
   }
 
   const port = BROWSER_FALLBACK_PORT;
-  const profileDir = `${getHomeDir()}/.pi/agent/tmp/browser-cdp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const profileDir = join(homedir(), ".pi", "agent", "tmp", `browser-cdp-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   await run("mkdir", ["-p", profileDir]);
 
   const browserProcess = spawnDetached(browserBinary, [
@@ -990,8 +972,7 @@ async function runPlaywrightFallback(ctx: ExtensionContext, url: string, toolNam
   } catch (error) {
     if (isMissingModuleError(error, "playwright")) {
       const reason = "Playwright is not available in the installed extension runtime.";
-      if (!playwrightWarned && ctx.hasUI) {
-        playwrightWarned = true;
+      if (ctx.hasUI) {
         ctx.ui.notify(reason, "warning");
       }
       return makeMissingPlaywrightResult(toolName, url, reason);
@@ -1005,7 +986,7 @@ async function runPlaywrightFallback(ctx: ExtensionContext, url: string, toolNam
 
   // First try system browsers if any found
   for (const browserBinary of browserBinaries) {
-    const profileDir = `${getHomeDir()}/.pi/agent/tmp/browser-playwright-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const profileDir = join(homedir(), ".pi", "agent", "tmp", `browser-playwright-${Date.now()}-${Math.random().toString(16).slice(2)}`);
     await run("mkdir", ["-p", profileDir]);
 
     let context: Awaited<ReturnType<typeof chromium.launchPersistentContext>> | undefined;
