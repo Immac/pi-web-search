@@ -21,6 +21,7 @@ type RunOptions = {
 };
 
 // ── Constants ──────────────────────────────────────────────────────────
+const AUTH_FILE = join(homedir(), ".pi", "agent", "auth.json");
 const LIGHTPANDA_INSTALL_URL = "https://github.com/lightpanda-io/browser";
 const LIGHTPANDA_BINARY_NAME = "lightpanda";
 const LIGHTPANDA_INSTALL_PATH = join(homedir(), ".pi", "agent", "bin", LIGHTPANDA_BINARY_NAME);
@@ -262,6 +263,110 @@ async function searchSearxng(
   return lines.join("\n") || "No results found.";
 }
 
+// ── API key resolution: auth.json → env var ──────────────────────────
+// Reads from ~/.pi/agent/auth.json first (where ask_secret stores keys),
+// then falls back to environment variables.
+function resolveApiKey(keyName: string): string | undefined {
+  const fromEnv = process.env[keyName]?.trim();
+  if (fromEnv) return fromEnv;
+  try {
+    const raw = readFileSync(AUTH_FILE, "utf8");
+    const auth = JSON.parse(raw) as Record<string, unknown>;
+    const entry = auth[keyName] as Record<string, unknown> | undefined;
+    if (entry && typeof entry.key === "string" && entry.key.trim()) {
+      return entry.key.trim();
+    }
+  } catch { /* auth.json missing or unreadable — try env var */ }
+  return undefined;
+}
+
+// ── Official Search APIs ──────────────────────────────────────────────
+// Backends purpose-built for programmatic/LLM access — clean JSON,
+// no scraping, no blocking. Keys resolved via auth.json → env var.
+//   WEBSEARCH_BRAVE_KEY    — Brave Search API (2,000 free queries/month)
+//   WEBSEARCH_GOOGLE_KEY   — Google CSE API key (100 free queries/day)
+//   WEBSEARCH_GOOGLE_CX    — Google CSE search engine ID
+//   WEBSEARCH_TAVILY_KEY   — Tavily API (1,000 free queries/month)
+
+async function searchBrave(query: string, signal?: AbortSignal): Promise<string | undefined> {
+  const key = resolveApiKey("WEBSEARCH_BRAVE_KEY");
+  if (!key) return undefined;
+  try {
+    const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}`;
+    const res = await run("curl", [
+      "-fsSL", "--max-time", "10",
+      "-H", "Accept: application/json",
+      "-H", `X-Subscription-Token: ${key}`,
+      url,
+    ], undefined, { signal, timeoutMs: 12000 });
+    const data = JSON.parse(res.stdout) as Record<string, unknown>;
+    const web = data.web as Record<string, unknown> | undefined;
+    const results = (web?.results as Array<Record<string, unknown>>) || [];
+    const lines: string[] = [];
+    for (const r of results) {
+      lines.push(`- [${safeStr(r.title)}](${safeStr(r.url)}) — ${safeStr(r.description)} *(via brave-api)*`);
+    }
+    return lines.join("\n") || "No results found.";
+  } catch { return undefined; }
+}
+
+async function searchGoogleCse(query: string, signal?: AbortSignal): Promise<string | undefined> {
+  const key = resolveApiKey("WEBSEARCH_GOOGLE_KEY");
+  const cx = resolveApiKey("WEBSEARCH_GOOGLE_CX");
+  if (!key || !cx) return undefined;
+  try {
+    const url = `https://www.googleapis.com/customsearch/v1?key=${encodeURIComponent(key)}&cx=${encodeURIComponent(cx)}&q=${encodeURIComponent(query)}`;
+    const res = await run("curl", ["-fsSL", "--max-time", "10", url], undefined, { signal, timeoutMs: 12000 });
+    const data = JSON.parse(res.stdout) as Record<string, unknown>;
+    const items = (data.items as Array<Record<string, unknown>>) || [];
+    const lines: string[] = [];
+    for (const item of items) {
+      lines.push(`- [${safeStr(item.title)}](${safeStr(item.link)}) — ${safeStr(item.snippet)} *(via google-cse)*`);
+    }
+    return lines.join("\n") || "No results found.";
+  } catch { return undefined; }
+}
+
+async function searchTavily(query: string, signal?: AbortSignal): Promise<string | undefined> {
+  const key = resolveApiKey("WEBSEARCH_TAVILY_KEY");
+  if (!key) return undefined;
+  try {
+    const url = "https://api.tavily.com/search";
+    const body = JSON.stringify({ api_key: key, query, search_depth: "basic", max_results: 10 });
+    const res = await run("curl", [
+      "-fsSL", "--max-time", "10",
+      "-H", "Content-Type: application/json",
+      "-d", body,
+      url,
+    ], undefined, { signal, timeoutMs: 12000 });
+    const data = JSON.parse(res.stdout) as Record<string, unknown>;
+    const results = (data.results as Array<Record<string, unknown>>) || [];
+    const lines: string[] = [];
+    for (const r of results) {
+      lines.push(`- [${safeStr(r.title)}](${safeStr(r.url)}) — ${safeStr(r.content)} *(via tavily)*`);
+    }
+    return lines.join("\n") || "No results found.";
+  } catch { return undefined; }
+}
+
+async function searchWithApiBackend(
+  query: string,
+  signal?: AbortSignal,
+): Promise<{ text: string; backend: string } | undefined> {
+  const backends: Array<{ name: string; fn: (q: string, s?: AbortSignal) => Promise<string | undefined> }> = [
+    { name: "brave", fn: searchBrave },
+    { name: "google-cse", fn: searchGoogleCse },
+    { name: "tavily", fn: searchTavily },
+  ];
+  for (const b of backends) {
+    try {
+      const text = await b.fn(query, signal);
+      if (text) return { text, backend: b.name };
+    } catch { /* try next */ }
+  }
+  return undefined;
+}
+
 // ── Browser detection ──────────────────────────────────────────────────
 async function isBrowserAvailable(binary: string): Promise<boolean> {
   try {
@@ -303,12 +408,24 @@ function isMissingModuleError(error: unknown, moduleName: string): boolean {
     haystack.includes("err_module_not_found");
 }
 
+/**
+ * Detect actual anti-bot challenge pages. Avoids false positives from
+ * benign mentions (e.g. "speed.cloudflare.com" in search results).
+ */
 function isBlockedOrChallenge(text: string): boolean {
   const n = text.toLowerCase();
   return n.includes("navigation failed") ||
     n.includes("performing security verification") ||
     n.includes("verification successful") ||
-    n.includes("cloudflare") ||
+    // Cloudflare challenge: these phrases appear on actual challenge pages
+    // but NOT in search snippets mentioning "speed.cloudflare.com"
+    (n.includes("cloudflare") && (
+      n.includes("just a moment") ||
+      n.includes("checking your browser") ||
+      n.includes("please complete the security check") ||
+      n.includes("attention required") ||
+      n.includes("ddos protection")
+    )) ||
     n.includes("bot verification") ||
     (n.includes("duckduckgo") && n.includes("select all squares containing a duck"));
 }
@@ -443,12 +560,25 @@ async function fetchWithFallback(
   const cached = cacheRead(url);
   if (cached) return cached;
 
-  // ── For web-search, try SearXNG first ────────────────────────────────
+  // ── For web-search, try API backends → SearXNG → renderers ──────────
   if (toolName === "web-search") {
-    const wantSearxng = SEARCH_BACKEND === "searxng" || (SEARCH_BACKEND === "auto" && await isSearxngAvailable(SEARXNG_URL));
-    if (wantSearxng) {
-      const query = extractQueryFromUrl(url);
-      if (query) {
+    const query = extractQueryFromUrl(url);
+    if (query) {
+      // 1. Official search APIs (Brave, Google CSE, Tavily) — clean JSON,
+      //    no blocking, purpose-built for programmatic access.
+      const apiResult = await searchWithApiBackend(query, signal);
+      if (apiResult) {
+        const result: ToolOutput = {
+          content: [{ type: "text", text: makeResultText(toolName, url, apiResult.text) }],
+          details: { url, rendered: true, backend: apiResult.backend },
+        };
+        cacheWrite(url, result);
+        return result;
+      }
+
+      // 2. SearXNG — local aggregator across 70+ engines
+      const wantSearxng = SEARCH_BACKEND === "searxng" || (SEARCH_BACKEND === "auto" && await isSearxngAvailable(SEARXNG_URL));
+      if (wantSearxng) {
         try {
           const text = await searchSearxng(query, SEARXNG_URL, signal);
           const result: ToolOutput = {
@@ -457,7 +587,10 @@ async function fetchWithFallback(
           };
           cacheWrite(url, result);
           return result;
-        } catch { /* fall through to Lightpanda */ }
+        } catch (e) {
+          const reason = e instanceof Error ? e.message : String(e);
+          if (ctx.hasUI) ctx.ui.notify(`SearXNG search failed, falling through: ${reason}`, "info");
+        }
       }
     }
   }
@@ -476,6 +609,8 @@ async function fetchWithFallback(
         };
         cacheWrite(url, toolResult);
         return toolResult;
+      } else if (body && ctx.hasUI) {
+        ctx.ui.notify("Lightpanda output blocked — likely false positive", "warning");
       }
     } catch { /* fall through */ }
   }

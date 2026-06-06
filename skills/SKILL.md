@@ -10,11 +10,12 @@ description: Browser-backed web search using the web-search tool and Lightpanda.
 This extension provides 5 tools for web research, with a priority chain:
 
 ```
-web-search:   SearXNG (if available) → Lightpanda → Playwright (fallback)
-open-url:     Lightpanda → Playwright (fallback)
+web-search:   Brave API → Google CSE → Tavily → SearXNG → Lightpanda → Playwright
+open-url:     Lightpanda → Playwright
 ```
 
-- **SearXNG** is preferred for search — aggregates across 70+ engines, so if one blocks others still work. Auto-detects at `http://localhost:8888`.
+- **Official search APIs** (Brave, Google CSE, Tavily) are tried first — clean JSON, no blocking, purpose-built for LLM/programmatic access. Configure via env vars (no key = skipped).
+- **SearXNG** aggregates across 70+ engines, so if one blocks others still work. Auto-detects at `http://localhost:8888`.
 - **Lightpanda** is the primary renderer: fast, lightweight, no JavaScript.
 - **Playwright** is the final fallback for JavaScript-heavy or bot-protected sites.
 - **Results are cached** (5 min for search, 1 hour for pages) — repeated queries are instant.
@@ -24,7 +25,8 @@ open-url:     Lightpanda → Playwright (fallback)
 ### Basic Search
 ```bash
 web-search --query "Yasaka Kanako"
-# → Tries SearXNG → falls through to Lightpanda/Bing → falls through to Playwright
+# → Tries Brave API → Google CSE → Tavily → SearXNG → Lightpanda → Playwright
+# If any API key is configured, that backend is tried first and falls through if it fails.
 ```
 
 ### Direct URL Access
@@ -34,7 +36,9 @@ open-url --url "https://en.wikipedia.org/wiki/Touhou_Project"
 ```
 
 ### Fallback Chain
-Tools automatically try: **SearXNG (search only) → Lightpanda → Playwright**
+Tools automatically try: **Brave API → Google CSE → Tavily → SearXNG → Lightpanda → Playwright**
+
+API backends are tried in priority order. Each is skipped if its env var is unset.
 
 ## Detailed Tool Usage
 
@@ -46,9 +50,12 @@ Tools automatically try: **SearXNG (search only) → Lightpanda → Playwright**
 - Refining a query after noisy results
 
 **Fallback chain:**
-1. **SearXNG** — Returns parsed `{title, snippet, url}` results. Fast, structured, engine-diverse.
-2. **Lightpanda** — Renders Bing HTML search as markdown. Works for most queries.
-3. **Playwright** — Full browser automation. Handles JS-heavy or protected sites.
+1. **Brave Search API** — 2,000 free queries/month. Clean JSON. Set `WEBSEARCH_BRAVE_KEY`.
+2. **Google CSE** — 100 free queries/day. Set `WEBSEARCH_GOOGLE_KEY` + `WEBSEARCH_GOOGLE_CX`.
+3. **Tavily** — 1,000 free queries/month. Purpose-built for LLM RAG. Set `WEBSEARCH_TAVILY_KEY`.
+4. **SearXNG** — Returns parsed `{title, snippet, url}` results. Fast, structured, engine-diverse.
+5. **Lightpanda** — Renders Bing HTML search as markdown. Works for most queries.
+6. **Playwright** — Full browser automation. Handles JS-heavy or protected sites.
 
 **Workflow:**
 1. Start with a precise query
@@ -98,15 +105,35 @@ set-browser-fallback --browserPath /usr/bin/brave-browser-stable
 
 ## Configuration
 
+### API Key Management (via Secret Store)
+
+API keys go in environment variables. The recommended workflow:
+
+```bash
+# Store your key in the secret store (safe, persisted in auth.json)
+ask_secret --key WEBSEARCH_BRAVE_KEY --prompt "Enter your Brave Search API key"
+
+# Then when starting pi, load it:
+with_secret --key WEBSEARCH_BRAVE_KEY -- env WEBSEARCH_BRAVE_KEY=$SECRET pi
+```
+
+Alternatively, set them directly in your shell profile or pi config.
+
 ### Environment Variables
 
 | Variable | Purpose | Default |
 |---|---|---|
+| `WEBSEARCH_BRAVE_KEY` | Brave Search API key (2,000 free queries/mo) | — |
+| `WEBSEARCH_GOOGLE_KEY` | Google CSE API key (100 free queries/day) | — |
+| `WEBSEARCH_GOOGLE_CX` | Google CSE search engine ID | — |
+| `WEBSEARCH_TAVILY_KEY` | Tavily API key (1,000 free queries/mo) | — |
 | `LIGHTPANDA_BIN` | Path to Lightpanda binary | `~/.pi/agent/bin/lightpanda` |
 | `WEBSEARCH_URL_TEMPLATE` | Fallback search URL (when SearXNG is unavailable) | Bing HTML |
 | `WEBSEARCH_BACKEND` | Search backend: `auto`, `searxng`, or `bing` | `auto` |
 | `WEBSEARCH_SEARXNG_URL` | SearXNG instance URL | `http://localhost:8888` |
 | `BROWSER_FALLBACK_BIN` | Browser path for Playwright fallback | Auto-detected |
+
+API keys are checked at runtime. If the corresponding env var is unset, that backend is skipped entirely (no error).
 
 ### Search Backend Selection
 

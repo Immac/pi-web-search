@@ -39,7 +39,14 @@ function isBlockedOrChallenge(text: string): boolean {
     n.includes("navigation failed") ||
     n.includes("performing security verification") ||
     n.includes("verification successful") ||
-    n.includes("cloudflare") ||
+    // Cloudflare challenge: requires both "cloudflare" AND a challenge phrase
+    (n.includes("cloudflare") && (
+      n.includes("just a moment") ||
+      n.includes("checking your browser") ||
+      n.includes("please complete the security check") ||
+      n.includes("attention required") ||
+      n.includes("ddos protection")
+    )) ||
     n.includes("bot verification") ||
     (n.includes("duckduckgo") && n.includes("select all squares containing a duck"))
   );
@@ -187,7 +194,20 @@ describe("isBlockedOrChallenge", () => {
   });
 
   it("detects cloudflare challenge", () => {
-    expect(isBlockedOrChallenge("Please complete the Cloudflare security check")).toBe(true);
+    expect(isBlockedOrChallenge("Checking your browser before accessing this Cloudflare-protected site")).toBe(true);
+  });
+
+  it("detects cloudflare just-a-moment page", () => {
+    expect(isBlockedOrChallenge("Just a moment... Verifying you are human. (Cloudflare)")).toBe(true);
+  });
+
+  it("detects cloudflare attention required", () => {
+    expect(isBlockedOrChallenge("Attention Required! Cloudflare security check")).toBe(true);
+  });
+
+  it("does not false-positive on cloudflare mentions in search results", () => {
+    expect(isBlockedOrChallenge("Speed test results from speed.cloudflare.com show 500Mbps")).toBe(false);
+    expect(isBlockedOrChallenge("Cloudflare is used by 20% of the internet")).toBe(false);
   });
 
   it("detects bot verification page", () => {
