@@ -25,6 +25,12 @@ The `BRAVE_BIN`, `BRAVE_BROWSER_BIN`, `CHROME_BIN`, `GOOGLE_CHROME_BIN`, and `WE
 - `WEBSEARCH_BACKEND` (search backend selection)
 - `WEBSEARCH_SEARXNG_URL` (SearXNG instance URL)
 
+#### New API backend env vars added
+
+- `WEBSEARCH_BRAVE_KEY` — Brave Search API (2,000 free queries/month)
+- `WEBSEARCH_GOOGLE_KEY` + `WEBSEARCH_GOOGLE_CX` — Google CSE (100 free queries/day)
+- `WEBSEARCH_TAVILY_KEY` — Tavily (1,000 free queries/month)
+
 ## Package Shape
 
 - **Package name:** `web-search`
@@ -41,7 +47,7 @@ The `BRAVE_BIN`, `BRAVE_BROWSER_BIN`, `CHROME_BIN`, `GOOGLE_CHROME_BIN`, and `WE
 
 The extension registers **five** custom tools:
 
-- `web-search` — Search the web: tries SearXNG first, then Lightpanda, then Playwright
+- `web-search` — Search the web: tries Brave API → Google CSE → Tavily → SearXNG → Lightpanda → Playwright
 - `open-url` — Open a specific URL: tries Lightpanda, then Playwright
 - `install-lightpanda` — Download and install Lightpanda binary
 - `install-playwright` — Install Playwright in the extension runtime
@@ -50,18 +56,21 @@ The extension registers **five** custom tools:
 ### Fallback Chain
 
 ```
-web-search:   SearXNG (auto-detect) → Lightpanda → Playwright → Error
+web-search:   Brave API → Google CSE → Tavily → SearXNG → Lightpanda → Playwright → Error
 open-url:     Lightpanda → Playwright → Error
 ```
 
-**SearXNG** is preferred for search because it aggregates across 70+ engines — if one blocks, others still work. Detected automatically at `http://localhost:8888`, or configured via `WEBSEARCH_BACKEND=searxng` + `WEBSEARCH_SEARXNG_URL`.
+**Brave Search API** (2,000 free queries/month), **Google CSE** (100 free queries/day), and **Tavily** (1,000 free queries/month) are tried first — clean JSON, no blocking, purpose-built for LLM/programmatic access. Each is skipped if its env var is unset.
+
+**SearXNG** aggregates across 70+ engines — if one blocks, others still work. Auto-detects at `http://localhost:8888`, or configured via `WEBSEARCH_BACKEND=searxng` + `WEBSEARCH_SEARXNG_URL`.
 
 **Lightpanda** is the primary page renderer: fast, lightweight, no JS.
 
-**Playwright** is the final fallback for JavaScript-heavy or bot-protected sites.
+**Playwright** is the final browser fallback for JavaScript-heavy or bot-protected sites.
 
 ### When Fallbacks Fail
 
+- If all API backends are unconfigured, silently fall through to SearXNG
 - If SearXNG is unreachable, silently fall through to Lightpanda
 - If Lightpanda is unavailable, return guidance to call `install-lightpanda`
 - If Playwright is missing, return guidance to call `install-playwright`
@@ -71,9 +80,10 @@ open-url:     Lightpanda → Playwright → Error
 
 ### Search resolution (`web-search`)
 
-1. Check SearXNG availability (if `auto` or `searxng` backend)
-2. If available, send query via SearXNG JSON API → parse structured results
-3. On failure, fall through to Lightpanda → Playwright
+1. Try official search APIs in order if configured (Brave → Google CSE → Tavily)
+2. Check SearXNG availability (if `auto` or `searxng` backend)
+3. If available, send query via SearXNG JSON API → parse structured results
+4. On failure, fall through to Lightpanda → Playwright
 
 ### Page resolution (`open-url`)
 
@@ -82,7 +92,8 @@ open-url:     Lightpanda → Playwright → Error
 
 ### Why this approach
 
-- SearXNG provides engine diversity without code changes
+- Official APIs are the most reliable path: clean JSON, no anti-bot measures, generous free tiers
+- SearXNG provides engine diversity as a fallback when no API keys are configured
 - Lightpanda handles simple pages fast
 - Playwright handles complex pages when needed
 - Caching avoids repeated fetches to the same URL
@@ -100,6 +111,10 @@ Simple file-based cache at `~/.pi/agent/cache/web-search/<hash>.json`:
 
 | Variable | Purpose | Default |
 |---|---|---|
+| `WEBSEARCH_BRAVE_KEY` | Brave Search API key (2,000 free queries/mo) | — |
+| `WEBSEARCH_GOOGLE_KEY` | Google CSE API key (100 free queries/day) | — |
+| `WEBSEARCH_GOOGLE_CX` | Google CSE search engine ID | — |
+| `WEBSEARCH_TAVILY_KEY` | Tavily API key (1,000 free queries/mo) | — |
 | `LIGHTPANDA_BIN` | Path to Lightpanda binary | `~/.pi/agent/bin/lightpanda` |
 | `WEBSEARCH_URL_TEMPLATE` | Fallback search URL template | Bing HTML search |
 | `WEBSEARCH_BACKEND` | Search backend: `auto`, `searxng`, or `bing` | `auto` |
