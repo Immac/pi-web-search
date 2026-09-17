@@ -10,15 +10,17 @@ description: Browser-backed web search using the web-search tool and Lightpanda.
 This extension provides 5 tools for web research, with a priority chain:
 
 ```
-web-search:   Brave API → Google CSE → Tavily → SearXNG → Lightpanda → Playwright
-open-url:     Lightpanda → Playwright
+web-search:   Brave API → Google CSE → Tavily → SearXNG → static-fetch → Lightpanda → Playwright
+open-url:     static-fetch → Lightpanda → Playwright
 ```
 
 - **Official search APIs** (Brave, Google CSE, Tavily) are tried first — clean JSON, no blocking, purpose-built for LLM/programmatic access. Configure via env vars (no key = skipped).
 - **SearXNG** aggregates across 70+ engines, so if one blocks others still work. Auto-detects at `http://localhost:8888`.
+- **Static fetch** — plain native HTTP GET as a lightweight fallback before reaching for full renderers.
 - **Lightpanda** is the primary renderer: fast, lightweight, no JavaScript.
 - **Playwright** is the final fallback for JavaScript-heavy or bot-protected sites.
 - **Results are cached** (5 min for search, 1 hour for pages) — repeated queries are instant.
+- **Negative caching** — URLs that just failed all backends won't retry for 60 seconds.
 
 ## Quick Start
 
@@ -32,11 +34,11 @@ web-search --query "Yasaka Kanako"
 ### Direct URL Access
 ```bash
 open-url --url "https://en.wikipedia.org/wiki/Touhou_Project"
-# → Lightpanda → Playwright if needed
+# → Static fetch → Lightpanda → Playwright if needed
 ```
 
 ### Fallback Chain
-Tools automatically try: **Brave API → Google CSE → Tavily → SearXNG → Lightpanda → Playwright**
+Tools automatically try: **Brave API → Google CSE → Tavily → SearXNG → static-fetch → Lightpanda → Playwright**
 
 API backends are tried in priority order. Each is skipped if its env var is unset.
 
@@ -54,8 +56,9 @@ API backends are tried in priority order. Each is skipped if its env var is unse
 2. **Google CSE** — 100 free queries/day. Set `WEBSEARCH_GOOGLE_KEY` + `WEBSEARCH_GOOGLE_CX`.
 3. **Tavily** — 1,000 free queries/month. Purpose-built for LLM RAG. Set `WEBSEARCH_TAVILY_KEY`.
 4. **SearXNG** — Returns parsed `{title, snippet, url}` results. Fast, structured, engine-diverse.
-5. **Lightpanda** — Renders Bing HTML search as markdown. Works for most queries.
-6. **Playwright** — Full browser automation. Handles JS-heavy or protected sites.
+5. **Static fetch** — Plain native HTTP GET with browser-like User-Agent. Fast, no JS.
+6. **Lightpanda** — Renders Bing HTML search as markdown. Works for most queries.
+7. **Playwright** — Full browser automation. Handles JS-heavy or protected sites.
 
 **Workflow:**
 1. Start with a precise query
@@ -71,8 +74,9 @@ API backends are tried in priority order. Each is skipped if its env var is unse
 - Need to inspect page content directly
 
 **Fallback chain:**
-1. **Lightpanda** — Fast rendering
-2. **Playwright** — If Lightpanda is blocked or can't handle JS
+1. **Static fetch** — Plain HTTP GET, fast, no JS
+2. **Lightpanda** — Fast rendering
+3. **Playwright** — If Lightpanda is blocked or can't handle JS
 
 ### 3. install-lightpanda
 **When to use:**
@@ -131,6 +135,7 @@ Alternatively, set them directly in your shell profile or pi config.
 | `WEBSEARCH_URL_TEMPLATE` | Fallback search URL (when SearXNG is unavailable) | Bing HTML |
 | `WEBSEARCH_BACKEND` | Search backend: `auto`, `searxng`, or `bing` | `auto` |
 | `WEBSEARCH_SEARXNG_URL` | SearXNG instance URL | `http://localhost:8888` |
+| `WEBSEARCH_MAX_RESULTS` | Max results per search backend (1–50) | `15` |
 | `BROWSER_FALLBACK_BIN` | Browser path for Playwright fallback | Auto-detected |
 
 API keys are checked at runtime. If the corresponding env var is unset, that backend is skipped entirely (no error).
@@ -139,8 +144,8 @@ API keys are checked at runtime. If the corresponding env var is unset, that bac
 
 Set `WEBSEARCH_BACKEND` to control which search source is used:
 
-- **`auto`** (default) — Probes `http://localhost:8888` for SearXNG at search time. If found, uses it. Otherwise, falls back to the URL template.
-- **`searxng`** — Always use SearXNG. Fails if unreachable.
+- **`auto`** (default) — Tries Brave → Google CSE → Tavily first. If none are configured, probes `http://localhost:8888` for SearXNG. If found, uses it. Otherwise, falls back to the URL template.
+- **`searxng`** — Always use SearXNG first (skips the availability probe). If SearXNG fails, falls through to Lightpanda/Playwright.
 - **`bing`** — Skip SearXNG, go straight to Lightpanda/Bing.
 
 Example:
@@ -148,6 +153,16 @@ Example:
 export WEBSEARCH_BACKEND=searxng
 export WEBSEARCH_SEARXNG_URL=http://192.168.1.50:8888
 ```
+
+### Result Limits
+
+Control the maximum number of results returned per search backend:
+
+```bash
+export WEBSEARCH_MAX_RESULTS=20  # default: 15, min: 1, max: 50
+```
+
+Each snippet/content field is capped at **300 characters**. Page-dump text (from Lightpanda/Playwright/static-fetch) is capped at **50,000 characters** with a "... [truncated]" marker.
 
 ## Advanced Patterns
 
@@ -182,6 +197,7 @@ Knowing which backend served the result helps you interpret the output:
 | Backend | Output Format | Content Quality | Speed |
 |---|---|---|---|
 | **SearXNG** | Structured `{title, snippet, url}` per result. Source engine noted. | Snippets may truncate. Consistently formatted. | Fastest (~1-3s) |
+| **Static fetch** | Plain HTML → markdown. No JS. | Complete page text. May lose table structures. | Fast (~1-3s) |
 | **Lightpanda** | Rendered page → plain markdown. Full HTML stripped to text. | Complete page text. May lose table structures. | Fast (~3-5s) |
 | **Playwright** | Full browser render → `innerText` or fallback HTML→markdown | Highest fidelity, handles JS. Slower. | Slow (~5-15s) |
 
@@ -200,6 +216,7 @@ SearXNG results include `*(via engine_name)` per link — this tells you which o
 - **SearXNG** is the fastest path — aim for this as your default search backend
 - **Cached results** serve instantly — repeat a query you ran 2 minutes ago with no network cost
 - **Cache TTL**: 5 minutes for searches, 1 hour for pages
+- **Negative cache**: 60 seconds — URLs that just failed all backends won't retry
 - If you need fresh results: either wait for TTL expiry, or delete the cache directory
 - **Cache location**: `~/.pi/agent/cache/web-search/`
 - **Clear cache**: `rm -rf ~/.pi/agent/cache/web-search/`
@@ -234,7 +251,7 @@ The extension caches the result of browser detection for Playwright fallback. If
 
 ### All fallbacks failed
 - Site may have strong anti-bot protection
-- Try waiting before retrying
+- Try waiting before retrying (negative cache TTL is 60 seconds)
 - Consider setting up SearXNG for search queries (bypasses protected search pages entirely)
 - For particularly locked-down sites, manual browsing may be needed
 

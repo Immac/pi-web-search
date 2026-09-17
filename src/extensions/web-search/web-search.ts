@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +30,9 @@ const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(MODULE_DIR, "../../..");
 const CACHE_DIR = join(homedir(), ".pi", "agent", "cache", "web-search");
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 min for search, 1 hour for pages
+const MAX_SNIPPET_CHARS = 300;
+const PAGE_DUMP_MAX_CHARS = 50_000;
+const PAGE_DUMP_TRUNCATED_MARKER = "\n\n... [truncated]";
 
 // ── Helpers ────────────────────────────────────────────────────────────
 function sleep(ms: number): Promise<void> {
@@ -82,13 +85,43 @@ function simpleHash(str: string): string {
   return hash.toString(16);
 }
 
+// ── Result caps ────────────────────────────────────────────────────────
+function getMaxResults(): number {
+  const raw = parseInt(process.env.WEBSEARCH_MAX_RESULTS || "", 10);
+  if (Number.isFinite(raw)) return Math.min(50, Math.max(1, raw));
+  return 15;
+}
+
+function truncateSnippet(text: string): string {
+  if (text.length <= MAX_SNIPPET_CHARS) return text;
+  return text.slice(0, MAX_SNIPPET_CHARS) + "…";
+}
+
+function truncatePageDump(text: string): string {
+  if (text.length <= PAGE_DUMP_MAX_CHARS) return text;
+  return text.slice(0, PAGE_DUMP_MAX_CHARS) + PAGE_DUMP_TRUNCATED_MARKER;
+}
+
+// ── Caching ────────────────────────────────────────────────────────────
 function cacheRead(url: string): ToolOutput | undefined {
   const path = join(CACHE_DIR, `${simpleHash(url)}.json`);
   try {
     mkdirSync(CACHE_DIR, { recursive: true });
-    const data = JSON.parse(readFileSync(path, "utf8")) as { url: string; result: ToolOutput; cachedAt: number };
-    const ttl = data.url.startsWith("http") && data.url.includes("/search?") ? CACHE_TTL_MS : CACHE_TTL_MS * 12;
-    if (Date.now() - data.cachedAt < ttl) return data.result;
+    const data = JSON.parse(readFileSync(path, "utf8")) as { url: string; result: ToolOutput; cachedAt: number; failure?: boolean };
+    const ttl = data.failure
+      ? 60_000
+      : (data.url.startsWith("http") && data.url.includes("/search?") ? CACHE_TTL_MS : CACHE_TTL_MS * 12);
+    if (Date.now() - data.cachedAt < ttl) {
+      // Return the original ToolOutput for successes; for failures, return a
+      // generic "all backends failed" result so the caller sees it immediately.
+      if (data.failure) {
+        return {
+          content: [{ type: "text", text: `# web-search failed\n\nURL: ${url}\n\nAll backends failed. Retry in 60 seconds.` }],
+          details: { url, rendered: false, backend: "negative-cache" },
+        };
+      }
+      return data.result;
+    }
     rmSync(path, { force: true });
   } catch { /* ignore */ }
   return undefined;
@@ -100,6 +133,21 @@ function cacheWrite(url: string, result: ToolOutput): void {
     writeFileSync(join(CACHE_DIR, `${simpleHash(url)}.json`), JSON.stringify({ url, result, cachedAt: Date.now() }), "utf8");
   } catch { /* ignore */ }
 }
+
+function cacheWriteFailure(url: string): void {
+  try {
+    mkdirSync(CACHE_DIR, { recursive: true });
+    writeFileSync(
+      join(CACHE_DIR, `${simpleHash(url)}.json`),
+      JSON.stringify({ url, result: null, cachedAt: Date.now(), failure: true }),
+      "utf8",
+    );
+  } catch { /* ignore */ }
+}
+
+// ── SearXNG availability cache ─────────────────────────────────────────
+let _searxngCache: { available: boolean; probedAt: number } | undefined;
+const SEARXNG_CACHE_TTL_MS = 60_000;
 
 // ── Subprocess ─────────────────────────────────────────────────────────
 function run(
@@ -160,6 +208,28 @@ function run(
   });
 }
 
+// ── Native fetch helper ────────────────────────────────────────────────
+async function fetchWithTimeout(
+  url: string,
+  timeoutMs: number,
+  init?: { method?: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal },
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const signals = [controller.signal];
+  if (init?.signal) signals.push(init.signal);
+  try {
+    return await fetch(url, {
+      method: init?.method,
+      headers: init?.headers,
+      body: init?.body,
+      signal: AbortSignal.any(signals),
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // ── Lightpanda ─────────────────────────────────────────────────────────
 async function isLightpandaAvailable(binary: string): Promise<boolean> {
   try {
@@ -183,10 +253,18 @@ async function fetchMarkdown(
 
 // ── SearXNG ────────────────────────────────────────────────────────────
 async function isSearxngAvailable(searxngUrl: string): Promise<boolean> {
+  if (_searxngCache && (Date.now() - _searxngCache.probedAt) < SEARXNG_CACHE_TTL_MS) {
+    return _searxngCache.available;
+  }
   try {
-    await run("curl", ["-fsSL", "-o", "/dev/null", "--max-time", "5", `${searxngUrl}/search?q=test&format=json`]);
-    return true;
-  } catch { return false; }
+    const res = await fetchWithTimeout(`${searxngUrl}/search?q=test&format=json`, 5000);
+    const available = res.ok;
+    _searxngCache = { available, probedAt: Date.now() };
+    return available;
+  } catch {
+    _searxngCache = { available: false, probedAt: Date.now() };
+    return false;
+  }
 }
 
 // Safe string coercion for JSON API responses
@@ -207,10 +285,14 @@ async function searchSearxng(
   signal?: AbortSignal,
 ): Promise<string> {
   const url = `${searxngUrl}/search?q=${encodeURIComponent(query)}&format=json`;
-  const res = await run("curl", ["-fsSL", "--max-time", "10", url], undefined, { signal, timeoutMs: 12000 });
+  const res = await fetchWithTimeout(url, 10_000, { signal });
+
+  if (!res.ok) throw new Error(`SearXNG returned ${String(res.status)}`);
 
   // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-  const data: Record<string, unknown> = JSON.parse(res.stdout);
+  const data: Record<string, unknown> = await res.json() as Record<string, unknown>;
+
+  const maxResults = getMaxResults();
 
   const rawResults = data.results;
   const results: Array<Record<string, string>> = Array.isArray(rawResults)
@@ -222,7 +304,7 @@ async function searchSearxng(
           content: safeStr(obj.content),
           engine: safeStr(obj.engine),
         };
-      })
+      }).slice(0, maxResults)
     : [];
   const answers = safeStrArray(data.answers);
   const suggestions = safeStrArray(data.suggestions);
@@ -239,18 +321,18 @@ async function searchSearxng(
   const lines: string[] = [];
   if (infoboxes.length) {
     for (const box of infoboxes) {
-      lines.push(`> **${box.infobox}** — ${box.content}`);
+      lines.push(`> **${box.infobox}** — ${truncateSnippet(box.content)}`);
     }
     lines.push("");
   }
   if (numResults !== undefined) { lines.push(`**${numResults} results**`); lines.push(""); }
-  if (answers.length) { for (const a of answers) { lines.push(`> ${a}`); } lines.push(""); }
+  if (answers.length) { for (const a of answers) { lines.push(`> ${truncateSnippet(a)}`); } lines.push(""); }
   if (suggestions.length) { lines.push(`**Suggestions:** ${suggestions.join(", ")}`); lines.push(""); }
 
   for (const r of results) {
     const title = r.title || "Untitled";
     const href = r.url || "";
-    const snippet = r.content || "";
+    const snippet = truncateSnippet(r.content || "");
     const engine = r.engine || "?";
     lines.push(`- [${title}](${href}) — ${snippet} *(via ${engine})*`);
   }
@@ -292,19 +374,22 @@ async function searchBrave(query: string, signal?: AbortSignal): Promise<string 
   const key = resolveApiKey("WEBSEARCH_BRAVE_KEY");
   if (!key) return undefined;
   try {
-    const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}`;
-    const res = await run("curl", [
-      "-fsSL", "--max-time", "10",
-      "-H", "Accept: application/json",
-      "-H", `X-Subscription-Token: ${key}`,
-      url,
-    ], undefined, { signal, timeoutMs: 12000 });
-    const data = JSON.parse(res.stdout) as Record<string, unknown>;
+    const maxResults = getMaxResults();
+    const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${String(maxResults)}`;
+    const res = await fetchWithTimeout(url, 10_000, {
+      signal,
+      headers: {
+        "Accept": "application/json",
+        "X-Subscription-Token": key,
+      },
+    });
+    if (!res.ok) return undefined;
+    const data = await res.json() as Record<string, unknown>;
     const web = data.web as Record<string, unknown> | undefined;
-    const results = (web?.results as Array<Record<string, unknown>>) || [];
+    const results = ((web?.results as Array<Record<string, unknown>>) || []).slice(0, maxResults);
     const lines: string[] = [];
     for (const r of results) {
-      lines.push(`- [${safeStr(r.title)}](${safeStr(r.url)}) — ${safeStr(r.description)} *(via brave-api)*`);
+      lines.push(`- [${safeStr(r.title)}](${safeStr(r.url)}) — ${truncateSnippet(safeStr(r.description))} *(via brave-api)*`);
     }
     return lines.join("\n") || "No results found.";
   } catch { return undefined; }
@@ -315,13 +400,15 @@ async function searchGoogleCse(query: string, signal?: AbortSignal): Promise<str
   const cx = resolveApiKey("WEBSEARCH_GOOGLE_CX");
   if (!key || !cx) return undefined;
   try {
-    const url = `https://www.googleapis.com/customsearch/v1?key=${encodeURIComponent(key)}&cx=${encodeURIComponent(cx)}&q=${encodeURIComponent(query)}`;
-    const res = await run("curl", ["-fsSL", "--max-time", "10", url], undefined, { signal, timeoutMs: 12000 });
-    const data = JSON.parse(res.stdout) as Record<string, unknown>;
-    const items = (data.items as Array<Record<string, unknown>>) || [];
+    const maxResults = getMaxResults();
+    const url = `https://www.googleapis.com/customsearch/v1?key=${encodeURIComponent(key)}&cx=${encodeURIComponent(cx)}&q=${encodeURIComponent(query)}&num=${String(maxResults)}`;
+    const res = await fetchWithTimeout(url, 10_000, { signal });
+    if (!res.ok) return undefined;
+    const data = await res.json() as Record<string, unknown>;
+    const items = ((data.items as Array<Record<string, unknown>>) || []).slice(0, maxResults);
     const lines: string[] = [];
     for (const item of items) {
-      lines.push(`- [${safeStr(item.title)}](${safeStr(item.link)}) — ${safeStr(item.snippet)} *(via google-cse)*`);
+      lines.push(`- [${safeStr(item.title)}](${safeStr(item.link)}) — ${truncateSnippet(safeStr(item.snippet))} *(via google-cse)*`);
     }
     return lines.join("\n") || "No results found.";
   } catch { return undefined; }
@@ -331,19 +418,21 @@ async function searchTavily(query: string, signal?: AbortSignal): Promise<string
   const key = resolveApiKey("WEBSEARCH_TAVILY_KEY");
   if (!key) return undefined;
   try {
+    const maxResults = getMaxResults();
     const url = "https://api.tavily.com/search";
-    const body = JSON.stringify({ api_key: key, query, search_depth: "basic", max_results: 10 });
-    const res = await run("curl", [
-      "-fsSL", "--max-time", "10",
-      "-H", "Content-Type: application/json",
-      "-d", body,
-      url,
-    ], undefined, { signal, timeoutMs: 12000 });
-    const data = JSON.parse(res.stdout) as Record<string, unknown>;
-    const results = (data.results as Array<Record<string, unknown>>) || [];
+    const body = JSON.stringify({ api_key: key, query, search_depth: "basic", max_results: maxResults });
+    const res = await fetchWithTimeout(url, 10_000, {
+      signal,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+    if (!res.ok) return undefined;
+    const data = await res.json() as Record<string, unknown>;
+    const results = ((data.results as Array<Record<string, unknown>>) || []).slice(0, maxResults);
     const lines: string[] = [];
     for (const r of results) {
-      lines.push(`- [${safeStr(r.title)}](${safeStr(r.url)}) — ${safeStr(r.content)} *(via tavily)*`);
+      lines.push(`- [${safeStr(r.title)}](${safeStr(r.url)}) — ${truncateSnippet(safeStr(r.content))} *(via tavily)*`);
     }
     return lines.join("\n") || "No results found.";
   } catch { return undefined; }
@@ -473,7 +562,7 @@ async function runPlaywrightFallback(
 
   let context: Awaited<ReturnType<typeof chromium.launchPersistentContext>> | undefined;
   try {
-    await run("mkdir", ["-p", profileDir]);
+    mkdirSync(profileDir, { recursive: true });
     const launchOptions: {
       executablePath?: string;
       headless: boolean;
@@ -519,7 +608,7 @@ async function runPlaywrightFallback(
         `URL: ${url}`,
         `Browser: ${browserBinary || "playwright-chromium"}`,
         "",
-        text,
+        truncatePageDump(text),
       ].join("\n") }],
       details: { url, browserBinary: browserBinary || "playwright-chromium", rendered: true, fallback: "playwright" },
     };
@@ -560,25 +649,18 @@ async function fetchWithFallback(
   const cached = cacheRead(url);
   if (cached) return cached;
 
-  // ── For web-search, try API backends → SearXNG → renderers ──────────
+  // ── For web-search, try search backends → static fetch → renderers ──
   if (toolName === "web-search") {
     const query = extractQueryFromUrl(url);
     if (query) {
-      // 1. Official search APIs (Brave, Google CSE, Tavily) — clean JSON,
-      //    no blocking, purpose-built for programmatic access.
-      const apiResult = await searchWithApiBackend(query, signal);
-      if (apiResult) {
-        const result: ToolOutput = {
-          content: [{ type: "text", text: makeResultText(toolName, url, apiResult.text) }],
-          details: { url, rendered: true, backend: apiResult.backend },
-        };
-        cacheWrite(url, result);
-        return result;
-      }
+      // Determine backend ordering based on WEBSEARCH_BACKEND:
+      //   searxng  → SearXNG first, then API backends
+      //   auto/…  → API backends first, then SearXNG
+      const forcedSearxng = SEARCH_BACKEND === "searxng";
+      let searxngSucceeded = false;
 
-      // 2. SearXNG — local aggregator across 70+ engines
-      const wantSearxng = SEARCH_BACKEND === "searxng" || (SEARCH_BACKEND === "auto" && await isSearxngAvailable(SEARXNG_URL));
-      if (wantSearxng) {
+      if (forcedSearxng) {
+        // Forced SearXNG mode — skip the probe, just try the search
         try {
           const text = await searchSearxng(query, SEARXNG_URL, signal);
           const result: ToolOutput = {
@@ -591,7 +673,60 @@ async function fetchWithFallback(
           const reason = e instanceof Error ? e.message : String(e);
           if (ctx.hasUI) ctx.ui.notify(`SearXNG search failed, falling through: ${reason}`, "info");
         }
+      } else {
+        // Auto / unset — API backends first, then SearXNG
+        const apiResult = await searchWithApiBackend(query, signal);
+        if (apiResult) {
+          const result: ToolOutput = {
+            content: [{ type: "text", text: makeResultText(toolName, url, apiResult.text) }],
+            details: { url, rendered: true, backend: apiResult.backend },
+          };
+          cacheWrite(url, result);
+          return result;
+        }
+
+        // SearXNG — local aggregator across 70+ engines
+        const wantSearxng = SEARCH_BACKEND === "searxng" || (SEARCH_BACKEND === "auto" && await isSearxngAvailable(SEARXNG_URL));
+        if (wantSearxng) {
+          try {
+            const text = await searchSearxng(query, SEARXNG_URL, signal);
+            searxngSucceeded = true;
+            const result: ToolOutput = {
+              content: [{ type: "text", text: makeResultText(toolName, url, text) }],
+              details: { url, rendered: true, backend: "searxng" },
+            };
+            cacheWrite(url, result);
+            return result;
+          } catch (e) {
+            const reason = e instanceof Error ? e.message : String(e);
+            if (ctx.hasUI) ctx.ui.notify(`SearXNG search failed, falling through: ${reason}`, "info");
+          }
+        }
+
+        // Static HTTP fast path — try plain fetch before reaching for renderers.
+        // Skip when searxng already succeeded (search URLs don't need static-fetch).
+        if (!searxngSucceeded) {
+          const staticResult = await tryStaticFetch(url, toolName);
+          if (staticResult) {
+            cacheWrite(url, staticResult);
+            return staticResult;
+          }
+        }
       }
+    } else {
+      // open-url or search URL without a parseable query: try static fetch first
+      const staticResult = await tryStaticFetch(url, toolName);
+      if (staticResult) {
+        cacheWrite(url, staticResult);
+        return staticResult;
+      }
+    }
+  } else {
+    // open-url: try static fetch before heavy renderers
+    const staticResult = await tryStaticFetch(url, toolName);
+    if (staticResult) {
+      cacheWrite(url, staticResult);
+      return staticResult;
     }
   }
 
@@ -604,7 +739,7 @@ async function fetchWithFallback(
       const body = result.stdout.trim();
       if (body && !isBlockedOrChallenge(body)) {
         const toolResult: ToolOutput = {
-          content: [{ type: "text", text: makeResultText(toolName, url, body) }],
+          content: [{ type: "text", text: makeResultText(toolName, url, truncatePageDump(body)) }],
           details: { binary, url, available: true, rendered: true, backend: "lightpanda" },
         };
         cacheWrite(url, toolResult);
@@ -622,7 +757,9 @@ async function fetchWithFallback(
     return pwResult;
   }
 
-  // ── All failed ───────────────────────────────────────────────────────
+  // ── All failed — write negative cache entry ──────────────────────────
+  cacheWriteFailure(url);
+
   if (!lpAvailable) {
     return {
       content: [{ type: "text", text: `# ${toolName} unavailable\n\nLightpanda is required. Use: install-lightpanda` }],
@@ -634,6 +771,29 @@ async function fetchWithFallback(
     content: [{ type: "text", text: `# ${toolName} failed\n\nURL: ${url}\n\nLightpanda and Playwright could not render this page.` }],
     details: { url, rendered: false, backend: "lightpanda" },
   };
+}
+
+// ── Static HTTP fast path ──────────────────────────────────────────────
+// Attempt a plain native fetch before reaching for heavy renderers.
+async function tryStaticFetch(url: string, toolName: string): Promise<ToolOutput | undefined> {
+  try {
+    const res = await fetchWithTimeout(url, 15_000, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      },
+    });
+    if (!res.ok) return undefined;
+    const ct = res.headers.get("content-type") || "";
+    if (!ct.includes("text/html") && !ct.includes("text/plain")) return undefined;
+    const html = await res.text();
+    if (isBlockedOrChallenge(html)) return undefined;
+    return {
+      content: [{ type: "text", text: makeResultText(toolName, url, truncatePageDump(htmlToMarkdown(html))) }],
+      details: { url, rendered: true, backend: "static-fetch" },
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 // ── Setup tools ────────────────────────────────────────────────────────
@@ -657,9 +817,12 @@ async function installLightpanda(ctx: ExtensionContext, options: InstallParams):
   }
 
   const dest = join(homedir(), ".pi", "agent", "bin");
-  await run("mkdir", ["-p", dest]);
-  await run("curl", ["-fsSL", "-o", binary, buildReleaseUrl(assetName)]);
-  await run("chmod", ["a+x", binary]);
+  mkdirSync(dest, { recursive: true });
+  const res = await fetch(buildReleaseUrl(assetName));
+  if (!res.ok) throw new Error(`Download failed: HTTP ${String(res.status)}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  writeFileSync(binary, buf);
+  chmodSync(binary, 0o755);
   await run(binary, ["version"]);
 
   if (ctx.hasUI) ctx.ui.notify(`Lightpanda installed at ${binary}`, "info");

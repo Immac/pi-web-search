@@ -28,8 +28,9 @@ declare module "node:fs" {
   export function existsSync(path: string): boolean;
   export function readFileSync(path: string, encoding: string): string;
   export function rmSync(path: string, options?: { recursive?: boolean; force?: boolean }): void;
-  export function writeFileSync(path: string, data: string, encoding?: string): void;
+  export function writeFileSync(path: string, data: string | Buffer, encoding?: string): void;
   export function mkdirSync(path: string, options?: { recursive?: boolean }): void;
+  export function chmodSync(path: string, mode: number | string): void;
 }
 
 declare module "node:os" {
@@ -83,6 +84,12 @@ declare class AbortSignal {
   readonly reason: unknown;
   addEventListener(type: "abort", listener: () => void): void;
   removeEventListener(type: "abort", listener: () => void): void;
+  static any(signals: AbortSignal[]): AbortSignal;
+}
+
+declare class AbortController {
+  readonly signal: AbortSignal;
+  abort(reason?: unknown): void;
 }
 
 declare interface Error {
@@ -90,3 +97,28 @@ declare interface Error {
 }
 
 declare function require(name: string): unknown;
+
+// Buffer for file I/O
+declare class Buffer {
+  static from(arrayBuffer: ArrayBuffer): Buffer;
+}
+
+// Native fetch (Node 18+)
+declare function fetch(url: string, init?: {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  signal?: AbortSignal;
+  redirect?: string;
+}): Promise<Response>;
+
+declare interface Response {
+  readonly ok: boolean;
+  readonly status: number;
+  readonly headers: {
+    get(name: string): string | null;
+  };
+  json(): Promise<unknown>;
+  text(): Promise<string>;
+  arrayBuffer(): Promise<ArrayBuffer>;
+}

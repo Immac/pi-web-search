@@ -13,6 +13,9 @@ A lightweight pi extension that provides browser-backed web search and page brow
 - 🔄 **Automatic Fallbacks** — SearXNG → Lightpanda → Playwright/Chromium
 - 📄 **Markdown Output** — Clean markdown from rendered pages (SearXNG returns structured results)
 - ⚡ **Result Caching** — 5 min TTL for search, 1 hour for pages; repeated queries are instant
+- 🚫 **Negative Caching** — URLs that just failed all backends won't retry for 60 seconds
+- 🔌 **Native Fetch** — All HTTP via native `fetch` (Node 18+), no curl subprocesses
+- 📏 **Result Caps** — Configurable max results and snippet length limits
 - 🪶 **Trimmed Code** — No raw CDP WebSocket layer (~200 lines removed), 3 env vars consolidated
 
 ## 📦 Tools
@@ -47,6 +50,28 @@ Or use environment variables to configure:
 export WEBSEARCH_BACKEND=searxng
 export WEBSEARCH_SEARXNG_URL=http://localhost:8888
 ```
+
+### Backend Ordering
+
+The order in which search backends are tried depends on `WEBSEARCH_BACKEND`:
+
+| `WEBSEARCH_BACKEND` | Order |
+|---|---|
+| `auto` (default) | Brave → Google CSE → Tavily → SearXNG → Lightpanda → Playwright |
+| `searxng` | **SearXNG first** → then falls through to Lightpanda → Playwright |
+| unset | Same as `auto` |
+
+When set to `searxng`, the availability probe is skipped entirely — SearXNG is tried immediately, and on failure falls through to the renderer chain.
+
+### Result Limits
+
+Control the number of results returned per search backend:
+
+```bash
+export WEBSEARCH_MAX_RESULTS=20  # default: 15, min: 1, max: 50
+```
+
+Each snippet/content field is capped at **300 characters**. Page-dump text (from Lightpanda/Playwright/static-fetch) is capped at **50,000 characters** with a truncated marker.
 
 ## 💡 Usage Examples
 
@@ -85,6 +110,7 @@ Some sites (like Cloudflare-protected wikis) may block automated access:
 | `WEBSEARCH_URL_TEMPLATE` | Fallback search URL template | Bing HTML |
 | `WEBSEARCH_BACKEND` | Search backend: `auto`, `searxng`, or `bing` | `auto` |
 | `WEBSEARCH_SEARXNG_URL` | SearXNG instance URL | `http://localhost:8888` |
+| `WEBSEARCH_MAX_RESULTS` | Max results per search backend (1–50) | `15` |
 | `BROWSER_FALLBACK_BIN` | Browser path for Playwright fallback | Auto-detected |
 
 ### Configure Browser Fallback
