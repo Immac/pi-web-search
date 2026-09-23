@@ -82,10 +82,11 @@ open-url:     Lightpanda → Playwright → Error
 
 ### Search resolution (`web-search`)
 
-1. Try search APIs in order (Exa → Parallel keyless, then Brave → Google CSE → Tavily if configured); honor 429 cooldowns
-2. Check SearXNG availability (if `auto` or `searxng` backend)
-3. If available, send query via SearXNG JSON API → parse structured results
-4. On failure, fall through to Lightpanda → Playwright
+1. If `WEBSEARCH_BACKEND=searxng`, try SearXNG first (skips the probe); an empty or failed answer falls through instead of short-circuiting
+2. Try search APIs in order (Exa → Parallel keyless, then Brave → Google CSE → Tavily if configured); honor 429 cooldowns
+3. Check SearXNG availability (if `auto` backend) and probe it after the API tier
+4. If available, send query via SearXNG JSON API → parse structured results
+5. On failure, fall through to Lightpanda → Playwright
 
 ### Page resolution (`open-url`)
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { parseMcpResponse, isCoolingDown, noteRateLimit } from "../src/extensions/web-search/web-search";
+import { parseMcpResponse, isCoolingDown, noteRateLimit, hasSearchResults } from "../src/extensions/web-search/web-search";
 
 // ── Replicate pure helper functions from web-search.ts for testing ─────
 
@@ -352,6 +352,25 @@ describe("parseMcpResponse", () => {
   it("returns undefined when content is empty or missing", () => {
     expect(parseMcpResponse(JSON.stringify({ result: { content: [] } }))).toBeUndefined();
     expect(parseMcpResponse(JSON.stringify({ error: { message: "boom" } }))).toBeUndefined();
+  });
+});
+
+// ── Empty-result detection (forced-searxng fallthrough) ────────────
+
+describe("hasSearchResults", () => {
+  it("rejects the empty sentinel and empties", () => {
+    expect(hasSearchResults("No results found.")).toBe(false);
+    expect(hasSearchResults("  No results found.  ")).toBe(false);
+    expect(hasSearchResults("")).toBe(false);
+    expect(hasSearchResults("   ")).toBe(false);
+    expect(hasSearchResults(undefined)).toBe(false);
+  });
+
+  it("accepts real result text", () => {
+    expect(hasSearchResults("- [Title](https://x.example) — snippet *(via google)*")).toBe(true);
+    expect(hasSearchResults("**12 results**\n\n- [A](https://a.example) *(via wikipedia)*")).toBe(true);
+    // a real result that merely mentions the sentinel phrase still counts
+    expect(hasSearchResults('title: "How to handle No results found" — https://x.example')).toBe(true);
   });
 });
 

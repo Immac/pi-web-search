@@ -58,10 +58,10 @@ The order in which search backends are tried depends on `WEBSEARCH_BACKEND`:
 | `WEBSEARCH_BACKEND` | Order |
 |---|---|
 | `auto` (default) | Exa → Parallel → Brave → Google CSE → Tavily → SearXNG → Lightpanda → Playwright |
-| `searxng` | **SearXNG first** → then falls through to Lightpanda → Playwright |
+| `searxng` | **SearXNG first** → API backends (Exa → …) → static → Lightpanda → Playwright |
 | unset | Same as `auto` |
 
-When set to `searxng`, the availability probe is skipped entirely — SearXNG is tried immediately, and on failure falls through to the renderer chain.
+When set to `searxng`, the availability probe is skipped entirely — SearXNG is tried immediately, and on failure **or empty results** it falls through to the API backends, then the renderer chain.
 
 ### Result Limits
 

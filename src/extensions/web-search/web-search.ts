@@ -345,6 +345,13 @@ async function searchSearxng(
   return lines.join("\n") || "No results found.";
 }
 
+/** True when a backend returned actual results (not the empty sentinel). */
+export function hasSearchResults(text: string | undefined): boolean {
+  if (!text) return false;
+  const trimmed = text.trim();
+  return trimmed.length > 0 && trimmed !== "No results found.";
+}
+
 // ── API key resolution: auth.json → env var ──────────────────────────
 // Reads from ~/.pi/agent/auth.json first (where ask_secret stores keys),
 // then falls back to environment variables.
@@ -823,39 +830,18 @@ async function fetchWithFallback(
       //   searxng  → SearXNG first, then API backends
       //   auto/…  → API backends first, then SearXNG
       const forcedSearxng = SEARCH_BACKEND === "searxng";
+      let searxngTried = false;
       let searxngSucceeded = false;
 
+      // Forced SearXNG mode — try it first, but an empty answer or a
+      // failure must NOT short-circuit the chain: fall through to the
+      // API backends (Exa → Parallel → …), matching the documented
+      // "SearXNG first, then API backends" ordering.
       if (forcedSearxng) {
-        // Forced SearXNG mode — skip the probe, just try the search
+        searxngTried = true;
         try {
           const text = await searchSearxng(query, SEARXNG_URL, signal);
-          const result: ToolOutput = {
-            content: [{ type: "text", text: makeResultText(toolName, url, text) }],
-            details: { url, rendered: true, backend: "searxng" },
-          };
-          cacheWrite(url, result);
-          return result;
-        } catch (e) {
-          const reason = e instanceof Error ? e.message : String(e);
-          if (ctx.hasUI) ctx.ui.notify(`SearXNG search failed, falling through: ${reason}`, "info");
-        }
-      } else {
-        // Auto / unset — API backends first, then SearXNG
-        const apiResult = await searchWithApiBackend(query, signal);
-        if (apiResult) {
-          const result: ToolOutput = {
-            content: [{ type: "text", text: makeResultText(toolName, url, apiResult.text) }],
-            details: { url, rendered: true, backend: apiResult.backend },
-          };
-          cacheWrite(url, result);
-          return result;
-        }
-
-        // SearXNG — local aggregator across 70+ engines
-        const wantSearxng = SEARCH_BACKEND === "searxng" || (SEARCH_BACKEND === "auto" && await isSearxngAvailable(SEARXNG_URL));
-        if (wantSearxng) {
-          try {
-            const text = await searchSearxng(query, SEARXNG_URL, signal);
+          if (hasSearchResults(text)) {
             searxngSucceeded = true;
             const result: ToolOutput = {
               content: [{ type: "text", text: makeResultText(toolName, url, text) }],
@@ -863,20 +849,58 @@ async function fetchWithFallback(
             };
             cacheWrite(url, result);
             return result;
+          }
+          if (ctx.hasUI) ctx.ui.notify("SearXNG returned no results — falling through to API backends", "info");
+        } catch (e) {
+          const reason = e instanceof Error ? e.message : String(e);
+          if (ctx.hasUI) ctx.ui.notify(`SearXNG search failed, falling through: ${reason}`, "info");
+        }
+      }
+
+      // API backends (Exa → Parallel → Brave → Google CSE → Tavily) — get
+      // their shot in every WEBSEARCH_BACKEND mode.
+      const apiResult = await searchWithApiBackend(query, signal);
+      if (apiResult) {
+        const result: ToolOutput = {
+          content: [{ type: "text", text: makeResultText(toolName, url, apiResult.text) }],
+          details: { url, rendered: true, backend: apiResult.backend },
+        };
+        cacheWrite(url, result);
+        return result;
+      }
+
+      // SearXNG — local aggregator across 70+ engines (auto/unset probe;
+      // forced mode already tried it above)
+      if (!searxngTried) {
+        const wantSearxng = SEARCH_BACKEND === "searxng" || (SEARCH_BACKEND === "auto" && await isSearxngAvailable(SEARXNG_URL));
+        if (wantSearxng) {
+          searxngTried = true;
+          try {
+            const text = await searchSearxng(query, SEARXNG_URL, signal);
+            if (hasSearchResults(text)) {
+              searxngSucceeded = true;
+              const result: ToolOutput = {
+                content: [{ type: "text", text: makeResultText(toolName, url, text) }],
+                details: { url, rendered: true, backend: "searxng" },
+              };
+              cacheWrite(url, result);
+              return result;
+            }
+            if (ctx.hasUI) ctx.ui.notify("SearXNG returned no results — falling through", "info");
           } catch (e) {
             const reason = e instanceof Error ? e.message : String(e);
             if (ctx.hasUI) ctx.ui.notify(`SearXNG search failed, falling through: ${reason}`, "info");
           }
         }
+      }
 
-        // Static HTTP fast path — try plain fetch before reaching for renderers.
-        // Skip when searxng already succeeded (search URLs don't need static-fetch).
-        if (!searxngSucceeded) {
-          const staticResult = await tryStaticFetch(url, toolName);
-          if (staticResult) {
-            cacheWrite(url, staticResult);
-            return staticResult;
-          }
+      // Static HTTP fast path — try plain fetch before reaching for renderers.
+      // Skip when searxng already succeeded (search URLs don't need static-fetch).
+      if (!searxngSucceeded) {
+        const staticResult = await tryStaticFetch(url, toolName);
+        if (staticResult) {
+          cacheWrite(url, staticResult);
+          return staticResult;
         }
       }
     } else {

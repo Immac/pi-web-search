@@ -149,7 +149,7 @@ API keys are checked at runtime. If the corresponding env var is unset, that bac
 Set `WEBSEARCH_BACKEND` to control which search source is used:
 
 - **`auto`** (default) — Tries Exa → Parallel → Brave → Google CSE → Tavily first (Exa/Parallel work without keys, so they are always attempted). If all fail, probes `http://localhost:8888` for SearXNG. If found, uses it; otherwise falls through to static-fetch → Lightpanda → Playwright. To make a local SearXNG the default, use `searxng` mode.
-- **`searxng`** — Always use SearXNG first (skips the availability probe). If SearXNG fails, falls through to Lightpanda/Playwright.
+- **`searxng`** — Always use SearXNG first (skips the availability probe). If SearXNG fails **or returns no results**, falls through to the API backends (Exa → Parallel → …), then Lightpanda/Playwright — an empty SearXNG answer never short-circuits the chain.
 - **`bing`** — Skip SearXNG, go straight to Lightpanda/Bing.
 
 Example:
