@@ -365,6 +365,8 @@ function resolveApiKey(keyName: string): string | undefined {
 // ── Official Search APIs ──────────────────────────────────────────────
 // Backends purpose-built for programmatic/LLM access — clean JSON,
 // no scraping, no blocking. Keys resolved via auth.json → env var.
+//   WEBSEARCH_EXA_KEY      — Exa MCP endpoint (anonymous works; key = dedicated quota)
+//   WEBSEARCH_PARALLEL_KEY — Parallel MCP endpoint (anonymous works; key = Bearer auth)
 //   WEBSEARCH_BRAVE_KEY    — Brave Search API (2,000 free queries/month)
 //   WEBSEARCH_GOOGLE_KEY   — Google CSE API key (100 free queries/day)
 //   WEBSEARCH_GOOGLE_CX    — Google CSE search engine ID
@@ -383,6 +385,7 @@ async function searchBrave(query: string, signal?: AbortSignal): Promise<string 
         "X-Subscription-Token": key,
       },
     });
+    if (res.status === 429) { noteRateLimit("brave", res); return undefined; }
     if (!res.ok) return undefined;
     const data = await res.json() as Record<string, unknown>;
     const web = data.web as Record<string, unknown> | undefined;
@@ -403,6 +406,7 @@ async function searchGoogleCse(query: string, signal?: AbortSignal): Promise<str
     const maxResults = getMaxResults();
     const url = `https://www.googleapis.com/customsearch/v1?key=${encodeURIComponent(key)}&cx=${encodeURIComponent(cx)}&q=${encodeURIComponent(query)}&num=${String(maxResults)}`;
     const res = await fetchWithTimeout(url, 10_000, { signal });
+    if (res.status === 429) { noteRateLimit("google-cse", res); return undefined; }
     if (!res.ok) return undefined;
     const data = await res.json() as Record<string, unknown>;
     const items = ((data.items as Array<Record<string, unknown>>) || []).slice(0, maxResults);
@@ -427,6 +431,7 @@ async function searchTavily(query: string, signal?: AbortSignal): Promise<string
       headers: { "Content-Type": "application/json" },
       body,
     });
+    if (res.status === 429) { noteRateLimit("tavily", res); return undefined; }
     if (!res.ok) return undefined;
     const data = await res.json() as Record<string, unknown>;
     const results = ((data.results as Array<Record<string, unknown>>) || []).slice(0, maxResults);
@@ -438,16 +443,177 @@ async function searchTavily(query: string, signal?: AbortSignal): Promise<string
   } catch { return undefined; }
 }
 
+// ── MCP search backends (Exa / Parallel) ──────────────────────────────
+// Hosted MCP JSON-RPC endpoints — the same ones opencode's `websearch`
+// tool uses. Anonymous access works; pass a key for dedicated quota.
+const EXA_MCP_URL = "https://mcp.exa.ai/mcp";
+const PARALLEL_MCP_URL = "https://search.parallel.ai/mcp";
+const MCP_TIMEOUT_MS = 15_000;
+const MCP_MAX_BODY_CHARS = 256 * 1024;
+const EXA_MAX_RESULTS = 20;
+
+// Parse an MCP `tools/call` response — either a direct JSON body or an
+// SSE stream (`data: {...}` lines). Returns the first content item's
+// text, or undefined when the payload can't be parsed.
+export function parseMcpResponse(body: string): string | undefined {
+  const extract = (payload: string): string | undefined => {
+    const trimmed = payload.trim();
+    if (!trimmed.startsWith("{")) return undefined;
+    try {
+      const parsed = JSON.parse(trimmed) as {
+        result?: { content?: Array<{ type?: string; text?: string }> };
+      };
+      const item = parsed.result?.content?.find(
+        (c) => c?.type === "text" && typeof c.text === "string" && c.text.length > 0,
+      );
+      return item?.text;
+    } catch { return undefined; }
+  };
+
+  const direct = extract(body);
+  if (direct !== undefined) return direct;
+  for (const line of body.split("\n")) {
+    if (!line.startsWith("data: ")) continue;
+    const data = extract(line.slice(6));
+    if (data !== undefined) return data;
+  }
+  return undefined;
+}
+
+// ── Rate-limit cooldown (HTTP 429) ────────────────────────────────────
+// Honors Retry-After, defaults to 60s, capped at 10 min — mirrors
+// opencode's provider rotation: cool the backend down, keep the chain
+// moving through the remaining backends.
+const COOLDOWNS = new Map<string, number>();
+
+export function isCoolingDown(name: string): boolean {
+  const until = COOLDOWNS.get(name);
+  if (until === undefined) return false;
+  if (Date.now() < until) return true;
+  COOLDOWNS.delete(name);
+  return false;
+}
+
+export function noteRateLimit(name: string, res: Response): void {
+  let ms = 60_000;
+  const ra = res.headers.get("retry-after");
+  if (ra) {
+    const seconds = Number(ra);
+    if (Number.isFinite(seconds) && seconds > 0) {
+      ms = seconds * 1000;
+    } else {
+      const date = Date.parse(ra);
+      if (!Number.isNaN(date)) ms = Math.max(date - Date.now(), 0) || 60_000;
+    }
+  }
+  COOLDOWNS.set(name, Date.now() + Math.min(ms, 600_000));
+}
+
+// POST a JSON-RPC `tools/call` request to an MCP endpoint and extract
+// the response text (JSON body or SSE stream), capped at 256KB.
+async function callMcp(
+  backend: string,
+  endpoint: string,
+  tool: string,
+  args: Record<string, unknown>,
+  headers: Record<string, string>,
+  signal?: AbortSignal,
+): Promise<string | undefined> {
+  const res = await fetchWithTimeout(endpoint, MCP_TIMEOUT_MS, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+      ...headers,
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: tool, arguments: args },
+    }),
+    signal,
+  });
+  if (res.status === 429) {
+    noteRateLimit(backend, res);
+    return undefined;
+  }
+  if (!res.ok) return undefined;
+  const raw = await res.text();
+  return parseMcpResponse(raw.slice(0, MCP_MAX_BODY_CHARS));
+}
+
+async function searchExa(query: string, signal?: AbortSignal): Promise<string | undefined> {
+  const key = resolveApiKey("WEBSEARCH_EXA_KEY");
+  try {
+    const endpoint = key ? `${EXA_MCP_URL}?exaApiKey=${encodeURIComponent(key)}` : EXA_MCP_URL;
+    const text = await callMcp(
+      "exa",
+      endpoint,
+      "web_search_exa",
+      {
+        query,
+        type: "auto",
+        numResults: Math.min(Math.max(getMaxResults(), 1), EXA_MAX_RESULTS),
+        livecrawl: "fallback",
+      },
+      {},
+      signal,
+    );
+    return text ? `${text.trim()}\n\n*(via exa)*` : undefined;
+  } catch { return undefined; }
+}
+
+async function searchParallel(query: string, signal?: AbortSignal): Promise<string | undefined> {
+  const key = resolveApiKey("WEBSEARCH_PARALLEL_KEY");
+  try {
+    const headers: Record<string, string> = { "User-Agent": "pi-web-search" };
+    if (key) headers.Authorization = `Bearer ${key}`;
+    const text = await callMcp(
+      "parallel",
+      PARALLEL_MCP_URL,
+      "web_search",
+      {
+        objective: query,
+        search_queries: [query],
+        session_id: `pi-${simpleHash(query + String(Date.now()))}`,
+      },
+      headers,
+      signal,
+    );
+    if (!text) return undefined;
+    // Parallel wraps results in JSON: { search_id, results: [{url,title,excerpts}] }
+    const trimmed = text.trim();
+    if (trimmed.startsWith("{")) {
+      try {
+        const data = JSON.parse(trimmed) as {
+          results?: Array<{ url?: string; title?: string; excerpts?: string[] }>;
+        };
+        const results = (data.results || []).slice(0, getMaxResults());
+        const lines = results.map((r) => {
+          const excerpt = Array.isArray(r.excerpts) && r.excerpts.length ? r.excerpts[0] : "";
+          return `- [${safeStr(r.title)}](${safeStr(r.url)})${excerpt ? ` — ${truncateSnippet(excerpt)}` : ""} *(via parallel)*`;
+        });
+        if (lines.length) return lines.join("\n");
+      } catch { /* fall through — return raw text */ }
+    }
+    return `${trimmed}\n\n*(via parallel)*`;
+  } catch { return undefined; }
+}
+
 async function searchWithApiBackend(
   query: string,
   signal?: AbortSignal,
 ): Promise<{ text: string; backend: string } | undefined> {
   const backends: Array<{ name: string; fn: (q: string, s?: AbortSignal) => Promise<string | undefined> }> = [
+    { name: "exa", fn: searchExa },
+    { name: "parallel", fn: searchParallel },
     { name: "brave", fn: searchBrave },
     { name: "google-cse", fn: searchGoogleCse },
     { name: "tavily", fn: searchTavily },
   ];
   for (const b of backends) {
+    if (isCoolingDown(b.name)) continue; // 429 cooldown — skip to the next backend
     try {
       const text = await b.fn(query, signal);
       if (text) return { text, backend: b.name };

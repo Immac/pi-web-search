@@ -27,6 +27,8 @@ The `BRAVE_BIN`, `BRAVE_BROWSER_BIN`, `CHROME_BIN`, `GOOGLE_CHROME_BIN`, and `WE
 
 #### New API backend env vars added
 
+- `WEBSEARCH_EXA_KEY` — Exa MCP endpoint (optional; anonymous access works)
+- `WEBSEARCH_PARALLEL_KEY` — Parallel MCP endpoint (optional; anonymous access works)
 - `WEBSEARCH_BRAVE_KEY` — Brave Search API (2,000 free queries/month)
 - `WEBSEARCH_GOOGLE_KEY` + `WEBSEARCH_GOOGLE_CX` — Google CSE (100 free queries/day)
 - `WEBSEARCH_TAVILY_KEY` — Tavily (1,000 free queries/month)
@@ -47,7 +49,7 @@ The `BRAVE_BIN`, `BRAVE_BROWSER_BIN`, `CHROME_BIN`, `GOOGLE_CHROME_BIN`, and `WE
 
 The extension registers **five** custom tools:
 
-- `web-search` — Search the web: tries Brave API → Google CSE → Tavily → SearXNG → Lightpanda → Playwright
+- `web-search` — Search the web: tries Exa → Parallel → Brave API → Google CSE → Tavily → SearXNG → Lightpanda → Playwright
 - `open-url` — Open a specific URL: tries Lightpanda, then Playwright
 - `install-lightpanda` — Download and install Lightpanda binary
 - `install-playwright` — Install Playwright in the extension runtime
@@ -56,11 +58,11 @@ The extension registers **five** custom tools:
 ### Fallback Chain
 
 ```
-web-search:   Brave API → Google CSE → Tavily → SearXNG → Lightpanda → Playwright → Error
+web-search:   Exa → Parallel → Brave API → Google CSE → Tavily → SearXNG → Lightpanda → Playwright → Error
 open-url:     Lightpanda → Playwright → Error
 ```
 
-**Brave Search API** (2,000 free queries/month), **Google CSE** (100 free queries/day), and **Tavily** (1,000 free queries/month) are tried first — clean JSON, no blocking, purpose-built for LLM/programmatic access. Each is skipped if its env var is unset.
+**Exa** and **Parallel** are hosted MCP JSON-RPC endpoints (the same ones opencode's `websearch` tool uses) and are tried first **without requiring an API key** — optional keys (`WEBSEARCH_EXA_KEY`, `WEBSEARCH_PARALLEL_KEY`) enable dedicated quota. **Brave Search API** (2,000 free queries/month), **Google CSE** (100 free queries/day), and **Tavily** (1,000 free queries/month) follow and are skipped if their env vars are unset. Any backend returning HTTP 429 is cooled down per `Retry-After` (default 60s, capped at 10 min) while the chain continues.
 
 **SearXNG** aggregates across 70+ engines — if one blocks, others still work. Auto-detects at `http://localhost:8888`, or configured via `WEBSEARCH_BACKEND=searxng` + `WEBSEARCH_SEARXNG_URL`.
 
@@ -80,7 +82,7 @@ open-url:     Lightpanda → Playwright → Error
 
 ### Search resolution (`web-search`)
 
-1. Try official search APIs in order if configured (Brave → Google CSE → Tavily)
+1. Try search APIs in order (Exa → Parallel keyless, then Brave → Google CSE → Tavily if configured); honor 429 cooldowns
 2. Check SearXNG availability (if `auto` or `searxng` backend)
 3. If available, send query via SearXNG JSON API → parse structured results
 4. On failure, fall through to Lightpanda → Playwright
@@ -111,6 +113,8 @@ Simple file-based cache at `~/.pi/agent/cache/web-search/<hash>.json`:
 
 | Variable | Purpose | Default |
 |---|---|---|
+| `WEBSEARCH_EXA_KEY` | Exa MCP key (optional — anonymous access works) | — |
+| `WEBSEARCH_PARALLEL_KEY` | Parallel MCP key (optional — anonymous access works) | — |
 | `WEBSEARCH_BRAVE_KEY` | Brave Search API key (2,000 free queries/mo) | — |
 | `WEBSEARCH_GOOGLE_KEY` | Google CSE API key (100 free queries/day) | — |
 | `WEBSEARCH_GOOGLE_CX` | Google CSE search engine ID | — |

@@ -10,11 +10,11 @@ description: Browser-backed web search using the web-search tool and Lightpanda.
 This extension provides 5 tools for web research, with a priority chain:
 
 ```
-web-search:   Brave API → Google CSE → Tavily → SearXNG → static-fetch → Lightpanda → Playwright
+web-search:   Exa → Parallel → Brave API → Google CSE → Tavily → SearXNG → static-fetch → Lightpanda → Playwright
 open-url:     static-fetch → Lightpanda → Playwright
 ```
 
-- **Official search APIs** (Brave, Google CSE, Tavily) are tried first — clean JSON, no blocking, purpose-built for LLM/programmatic access. Configure via env vars (no key = skipped).
+- **Search APIs** (Exa, Parallel, Brave, Google CSE, Tavily) are tried first — purpose-built for LLM/programmatic access. **Exa and Parallel need no API key** (anonymous MCP endpoints — the same ones opencode's `websearch` tool uses); Brave/Google CSE/Tavily are skipped unless configured via env vars. A backend that returns HTTP 429 cools down per `Retry-After` (default 60s, cap 10 min) and the chain moves on to the next.
 - **SearXNG** aggregates across 70+ engines, so if one blocks others still work. Auto-detects at `http://localhost:8888`.
 - **Static fetch** — plain native HTTP GET as a lightweight fallback before reaching for full renderers.
 - **Lightpanda** is the primary renderer: fast, lightweight, no JavaScript.
@@ -27,7 +27,7 @@ open-url:     static-fetch → Lightpanda → Playwright
 ### Basic Search
 ```bash
 web-search --query "Yasaka Kanako"
-# → Tries Brave API → Google CSE → Tavily → SearXNG → Lightpanda → Playwright
+# → Tries Exa → Parallel → Brave API → Google CSE → Tavily → SearXNG → Lightpanda → Playwright
 # If any API key is configured, that backend is tried first and falls through if it fails.
 ```
 
@@ -38,7 +38,7 @@ open-url --url "https://en.wikipedia.org/wiki/Touhou_Project"
 ```
 
 ### Fallback Chain
-Tools automatically try: **Brave API → Google CSE → Tavily → SearXNG → static-fetch → Lightpanda → Playwright**
+Tools automatically try: **Exa → Parallel → Brave API → Google CSE → Tavily → SearXNG → static-fetch → Lightpanda → Playwright**
 
 API backends are tried in priority order. Each is skipped if its env var is unset.
 
@@ -52,13 +52,15 @@ API backends are tried in priority order. Each is skipped if its env var is unse
 - Refining a query after noisy results
 
 **Fallback chain:**
-1. **Brave Search API** — 2,000 free queries/month. Clean JSON. Set `WEBSEARCH_BRAVE_KEY`.
-2. **Google CSE** — 100 free queries/day. Set `WEBSEARCH_GOOGLE_KEY` + `WEBSEARCH_GOOGLE_CX`.
-3. **Tavily** — 1,000 free queries/month. Purpose-built for LLM RAG. Set `WEBSEARCH_TAVILY_KEY`.
-4. **SearXNG** — Returns parsed `{title, snippet, url}` results. Fast, structured, engine-diverse.
-5. **Static fetch** — Plain native HTTP GET with browser-like User-Agent. Fast, no JS.
-6. **Lightpanda** — Renders Bing HTML search as markdown. Works for most queries.
-7. **Playwright** — Full browser automation. Handles JS-heavy or protected sites.
+1. **Exa** — Hosted MCP endpoint (`mcp.exa.ai`), **no key required**. Rich `Title/URL/Highlights` blocks. Optional `WEBSEARCH_EXA_KEY` for dedicated quota.
+2. **Parallel** — Hosted MCP endpoint (`search.parallel.ai`), **no key required**. Optional `WEBSEARCH_PARALLEL_KEY` (Bearer auth).
+3. **Brave Search API** — 2,000 free queries/month. Clean JSON. Set `WEBSEARCH_BRAVE_KEY`.
+4. **Google CSE** — 100 free queries/day. Set `WEBSEARCH_GOOGLE_KEY` + `WEBSEARCH_GOOGLE_CX`.
+5. **Tavily** — 1,000 free queries/month. Purpose-built for LLM RAG. Set `WEBSEARCH_TAVILY_KEY`.
+6. **SearXNG** — Returns parsed `{title, snippet, url}` results. Fast, structured, engine-diverse.
+7. **Static fetch** — Plain native HTTP GET with browser-like User-Agent. Fast, no JS.
+8. **Lightpanda** — Renders Bing HTML search as markdown. Works for most queries.
+9. **Playwright** — Full browser automation. Handles JS-heavy or protected sites.
 
 **Workflow:**
 1. Start with a precise query
@@ -127,6 +129,8 @@ Alternatively, set them directly in your shell profile or pi config.
 
 | Variable | Purpose | Default |
 |---|---|---|
+| `WEBSEARCH_EXA_KEY` | Exa MCP key (optional — anonymous access works) | — |
+| `WEBSEARCH_PARALLEL_KEY` | Parallel MCP key (optional — anonymous access works) | — |
 | `WEBSEARCH_BRAVE_KEY` | Brave Search API key (2,000 free queries/mo) | — |
 | `WEBSEARCH_GOOGLE_KEY` | Google CSE API key (100 free queries/day) | — |
 | `WEBSEARCH_GOOGLE_CX` | Google CSE search engine ID | — |
@@ -144,7 +148,7 @@ API keys are checked at runtime. If the corresponding env var is unset, that bac
 
 Set `WEBSEARCH_BACKEND` to control which search source is used:
 
-- **`auto`** (default) — Tries Brave → Google CSE → Tavily first. If none are configured, probes `http://localhost:8888` for SearXNG. If found, uses it. Otherwise, falls back to the URL template.
+- **`auto`** (default) — Tries Exa → Parallel → Brave → Google CSE → Tavily first (Exa/Parallel work without keys, so they are always attempted). If all fail, probes `http://localhost:8888` for SearXNG. If found, uses it; otherwise falls through to static-fetch → Lightpanda → Playwright. To make a local SearXNG the default, use `searxng` mode.
 - **`searxng`** — Always use SearXNG first (skips the availability probe). If SearXNG fails, falls through to Lightpanda/Playwright.
 - **`bing`** — Skip SearXNG, go straight to Lightpanda/Bing.
 
@@ -196,6 +200,7 @@ Knowing which backend served the result helps you interpret the output:
 
 | Backend | Output Format | Content Quality | Speed |
 |---|---|---|---|
+| **Exa / Parallel** | MCP text — Exa: `Title/URL/Highlights` blocks; Parallel: one line per result | Highlights/excerpts, richer than snippets | Fast (~1-3s) |
 | **SearXNG** | Structured `{title, snippet, url}` per result. Source engine noted. | Snippets may truncate. Consistently formatted. | Fastest (~1-3s) |
 | **Static fetch** | Plain HTML → markdown. No JS. | Complete page text. May lose table structures. | Fast (~1-3s) |
 | **Lightpanda** | Rendered page → plain markdown. Full HTML stripped to text. | Complete page text. May lose table structures. | Fast (~3-5s) |
@@ -213,7 +218,7 @@ SearXNG results include `*(via engine_name)` per link — this tells you which o
 
 ### Performance & Cache Strategy
 
-- **SearXNG** is the fastest path — aim for this as your default search backend
+- **SearXNG** (or keyless **Exa**) is the fastest path — in `auto` mode Exa is attempted first; set `WEBSEARCH_BACKEND=searxng` if you want the local aggregator to be the default
 - **Cached results** serve instantly — repeat a query you ran 2 minutes ago with no network cost
 - **Cache TTL**: 5 minutes for searches, 1 hour for pages
 - **Negative cache**: 60 seconds — URLs that just failed all backends won't retry

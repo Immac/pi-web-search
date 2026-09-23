@@ -8,7 +8,7 @@ A lightweight pi extension that provides browser-backed web search and page brow
 
 ## ✨ Features
 
-- 🔍 **Web Search** — SearXNG first (70+ engines), fallback to Lightpanda/Bing, then Playwright
+- 🔍 **Web Search** — Exa → Parallel → keyed APIs (Brave/Google CSE/Tavily) → SearXNG → Lightpanda → Playwright; **Exa & Parallel need no API key**
 - 🌐 **Open URL** — Directly open and render specific web pages via Lightpanda → Playwright
 - 🔄 **Automatic Fallbacks** — SearXNG → Lightpanda → Playwright/Chromium
 - 📄 **Markdown Output** — Clean markdown from rendered pages (SearXNG returns structured results)
@@ -22,7 +22,7 @@ A lightweight pi extension that provides browser-backed web search and page brow
 
 | Tool | Description |
 |---|---|
-| `web-search` | Search the web — SearXNG first, then Lightpanda, then Playwright |
+| `web-search` | Search the web — Exa → Parallel → keyed APIs → SearXNG → renderers |
 | `open-url` | Open a specific URL — Lightpanda, then Playwright |
 | `install-lightpanda` | Download and install the Lightpanda browser binary |
 | `install-playwright` | Install Playwright in the extension runtime |
@@ -57,7 +57,7 @@ The order in which search backends are tried depends on `WEBSEARCH_BACKEND`:
 
 | `WEBSEARCH_BACKEND` | Order |
 |---|---|
-| `auto` (default) | Brave → Google CSE → Tavily → SearXNG → Lightpanda → Playwright |
+| `auto` (default) | Exa → Parallel → Brave → Google CSE → Tavily → SearXNG → Lightpanda → Playwright |
 | `searxng` | **SearXNG first** → then falls through to Lightpanda → Playwright |
 | unset | Same as `auto` |
 
@@ -106,6 +106,12 @@ Some sites (like Cloudflare-protected wikis) may block automated access:
 
 | Variable | Purpose | Default |
 |---|---|---|
+| `WEBSEARCH_EXA_KEY` | Exa MCP key (optional — anonymous access works) | — |
+| `WEBSEARCH_PARALLEL_KEY` | Parallel MCP key (optional — anonymous access works) | — |
+| `WEBSEARCH_BRAVE_KEY` | Brave Search API key (2,000 free queries/mo) | — |
+| `WEBSEARCH_GOOGLE_KEY` | Google CSE API key (100 free queries/day) | — |
+| `WEBSEARCH_GOOGLE_CX` | Google CSE search engine ID | — |
+| `WEBSEARCH_TAVILY_KEY` | Tavily API key (1,000 free queries/mo) | — |
 | `LIGHTPANDA_BIN` | Path to Lightpanda binary | `~/.pi/agent/bin/lightpanda` |
 | `WEBSEARCH_URL_TEMPLATE` | Fallback search URL template | Bing HTML |
 | `WEBSEARCH_BACKEND` | Search backend: `auto`, `searxng`, or `bing` | `auto` |
@@ -124,13 +130,16 @@ set-browser-fallback --browserPath /usr/bin/brave-browser-stable
 ## 🔧 Fallback Chain
 
 ```
-web-search:   SearXNG → Lightpanda → Playwright → Error
-open-url:     Lightpanda → Playwright → Error
+web-search:   Exa → Parallel → Brave API → Google CSE → Tavily → SearXNG → static-fetch → Lightpanda → Playwright → Error
+open-url:     static-fetch → Lightpanda → Playwright → Error
 ```
 
-1. **SearXNG** (search only) — Aggregates 70+ engines, parses structured results
-2. **Lightpanda** — Fast, lightweight, no-JS renderer
-3. **Playwright/Chromium** — Full browser automation for JS-heavy and protected sites
+1. **Exa / Parallel** (search only, **no key needed**) — hosted MCP search endpoints (opencode-style); HTTP 429 cools a backend down per `Retry-After` and the chain moves on
+2. **Brave / Google CSE / Tavily** — official APIs, tried when configured
+3. **SearXNG** (search only) — Aggregates 70+ engines, parses structured results
+4. **Static fetch** — Plain native HTTP GET with browser-like User-Agent
+5. **Lightpanda** — Fast, lightweight, no-JS renderer
+6. **Playwright/Chromium** — Full browser automation for JS-heavy and protected sites
 
 ## What Was Removed
 

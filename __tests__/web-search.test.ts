@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { parseMcpResponse, isCoolingDown, noteRateLimit } from "../src/extensions/web-search/web-search";
 
 // ── Replicate pure helper functions from web-search.ts for testing ─────
 
@@ -304,5 +305,97 @@ describe("htmlToMarkdown", () => {
 
   it("handles input with only tags", () => {
     expect(htmlToMarkdown("<script>code</script><style>css</style>")).toBe("");
+  });
+});
+
+// ── MCP response parsing (Exa / Parallel backends) ─────────────────
+
+describe("parseMcpResponse", () => {
+  it("parses a direct JSON body", () => {
+    const body = JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      result: { content: [{ type: "text", text: "Title: Example\nURL: https://example.com" }] },
+    });
+    expect(parseMcpResponse(body)).toBe("Title: Example\nURL: https://example.com");
+  });
+
+  it("parses an SSE data line", () => {
+    const payload = JSON.stringify({
+      result: { content: [{ type: "text", text: "SSE result text" }] },
+    });
+    const body = `event: message\ndata: ${payload}\n\n`;
+    expect(parseMcpResponse(body)).toBe("SSE result text");
+  });
+
+  it("finds the data line among multiple SSE lines", () => {
+    const payload = JSON.stringify({
+      result: { content: [{ type: "text", text: "second line wins" }] },
+    });
+    const body = `event: message\ndata: {"not":"json-with-content"}\nevent: message\ndata: ${payload}\n`;
+    expect(parseMcpResponse(body)).toBe("second line wins");
+  });
+
+  it("picks the first text content item", () => {
+    const body = JSON.stringify({
+      result: { content: [{ type: "text", text: "first" }, { type: "text", text: "second" }] },
+    });
+    expect(parseMcpResponse(body)).toBe("first");
+  });
+
+  it("returns undefined for garbage", () => {
+    expect(parseMcpResponse("<html>rate limited</html>")).toBeUndefined();
+    expect(parseMcpResponse("")).toBeUndefined();
+    expect(parseMcpResponse("data: not json\n")).toBeUndefined();
+  });
+
+  it("returns undefined when content is empty or missing", () => {
+    expect(parseMcpResponse(JSON.stringify({ result: { content: [] } }))).toBeUndefined();
+    expect(parseMcpResponse(JSON.stringify({ error: { message: "boom" } }))).toBeUndefined();
+  });
+});
+
+// ── 429 cooldown (mirrors opencode's provider rotation) ────────────
+
+describe("rate-limit cooldown", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("unknown backends are never cooling down", () => {
+    expect(isCoolingDown("never-seen")).toBe(false);
+  });
+
+  it("a 429 without Retry-After cools down for 60s", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    noteRateLimit("t-cooldown-default", new Response(null, { status: 429 }));
+    expect(isCoolingDown("t-cooldown-default")).toBe(true);
+    vi.setSystemTime(new Date("2026-01-01T00:00:59Z"));
+    expect(isCoolingDown("t-cooldown-default")).toBe(true);
+    vi.setSystemTime(new Date("2026-01-01T00:01:01Z"));
+    expect(isCoolingDown("t-cooldown-default")).toBe(false);
+  });
+
+  it("honors a numeric Retry-After (seconds)", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    noteRateLimit("t-cooldown-numeric", new Response(null, { status: 429, headers: { "Retry-After": "120" } }));
+    expect(isCoolingDown("t-cooldown-numeric")).toBe(true);
+    vi.setSystemTime(new Date("2026-01-01T00:01:30Z"));
+    expect(isCoolingDown("t-cooldown-numeric")).toBe(true);
+    vi.setSystemTime(new Date("2026-01-01T00:02:01Z"));
+    expect(isCoolingDown("t-cooldown-numeric")).toBe(false);
+  });
+
+  it("caps cooldowns at 10 minutes", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+    noteRateLimit("t-cooldown-cap", new Response(null, { status: 429, headers: { "Retry-After": "86400" } }));
+    expect(isCoolingDown("t-cooldown-cap")).toBe(true);
+    vi.setSystemTime(new Date("2026-01-01T00:09:59Z"));
+    expect(isCoolingDown("t-cooldown-cap")).toBe(true);
+    vi.setSystemTime(new Date("2026-01-01T00:10:01Z"));
+    expect(isCoolingDown("t-cooldown-cap")).toBe(false);
   });
 });
